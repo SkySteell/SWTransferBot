@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from calc import CalcResult
 from order_parser import Order
 
 
@@ -14,7 +15,26 @@ def _money(v: int) -> str:
     return f"{v:,}".replace(",", " ")
 
 
-def format_card(o: Order, dispatcher: str, group: str) -> str:
+def format_calc(res: Optional[CalcResult], o: Order) -> str:
+    if res is None:
+        return "🧮 Считаю…"
+    if not res.ok:
+        return f"🧮 Расчёт невозможен: {res.reason}"
+    line = f"🧮 Калькулятор ({res.tariff}): {_money(res.calc_price)} ₽ · {res.km:.0f} км"
+    if res.km_source == "км из заказа":
+        line += " (км из заказа)"
+    if res.urgent:
+        line += f", срочная +{res.urgent_pct}%"
+    if res.diff is not None:
+        pct = res.diff / res.calc_price * 100 if res.calc_price else 0
+        sign = "🟢 +" if res.diff >= 0 else "🔴 −"
+        line += f"\n📊 Разница: {sign}{_money(abs(res.diff))} ₽ ({pct:+.0f}%)"
+    if o.tolls == "extra":
+        line += "\n   (платные дороги не учтены ни в заказе, ни в расчёте)"
+    return line
+
+
+def format_card(o: Order, dispatcher: str, group: str, calc_text: Optional[str] = None) -> str:
     head = "🆕 ЗАКАЗ"
     if o.urgent:
         head += " · ⚡ СРОЧНО"
@@ -52,6 +72,8 @@ def format_card(o: Order, dispatcher: str, group: str) -> str:
     if o.comment:
         lines.append(f"ℹ️ {o.comment}")
 
+    if calc_text:
+        lines.append(calc_text)
     lines.append(f"👤 Диспетчер: {dispatcher}")
     lines.append(f"👥 Группа: {group}")
     if o.route_confidence in ("medium", "low"):

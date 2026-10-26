@@ -22,7 +22,8 @@ from telethon.sessions import StringSession
 from telethon.tl.types import Channel, User
 
 import settings as settings_store
-from cards import format_card
+from calc import Geo, calculate
+from cards import format_calc, format_card
 from filters import passes
 from order_parser import Order, parse_order
 
@@ -43,6 +44,8 @@ user = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 bot = TelegramClient(StringSession(), API_ID, API_HASH)
 
 cfg = settings_store.load()
+geo = Geo(os.path.join(settings_store.DATA_DIR, "geocache.json"))
+bg_tasks: set = set()
 seen: dict[str, float] = {}
 raw_texts: "OrderedDict[int, str]" = OrderedDict()
 stats: Counter = Counter()
@@ -91,6 +94,21 @@ def who(sender, msg) -> tuple[str, Optional[str]]:
     return name, username
 
 
+async def attach_calc(sent, order: Order, name: str, group: str, rows) -> None:
+    """Считает стоимость по калькулятору и дописывает её в уже отправленную карточку."""
+    try:
+        res = await asyncio.wait_for(calculate(order, cfg.rates, cfg.urgent_pct, geo), timeout=60)
+        stats["расчёт выполнен" if res.ok else "расчёт невозможен"] += 1
+        text = format_card(order, name, group, format_calc(res, order))
+    except Exception:
+        log.exception("Ошибка расчёта")
+        text = format_card(order, name, group, "🧮 Расчёт невозможен: ошибка карты")
+    try:
+        await sent.edit(text, buttons=rows, link_preview=False)
+    except Exception:
+        pass  # карточку могли скрыть или изменить
+
+
 # ---------- чтение групп ----------
 
 @user.on(events.NewMessage(incoming=True))
@@ -127,12 +145,16 @@ async def on_message(event: events.NewMessage.Event) -> None:
         rows.append([Button.inline("🙈 Скрыть", b"hide"), Button.inline("⚠️ Ошибка", b"bad")])
 
         sent = await bot.send_message(
-            OWNER_ID, format_card(order, name, group), buttons=rows, link_preview=False
+            OWNER_ID, format_card(order, name, group, format_calc(None, order)),
+            buttons=rows, link_preview=False,
         )
         stats["отправлено"] += 1
         raw_texts[sent.id] = event.raw_text
         while len(raw_texts) > RAW_KEEP:
             raw_texts.popitem(last=False)
+        task = asyncio.create_task(attach_calc(sent, order, name, group, rows))
+        bg_tasks.add(task)
+        task.add_done_callback(bg_tasks.discard)
     except Exception:
         log.exception("Ошибка обработки сообщения")
 
@@ -154,6 +176,7 @@ def settings_text() -> str:
         f"🏁 Куда: {', '.join(c.to_cities) if c.to_cities else 'любые'}",
         f"⏱ Время подачи: {time_line}",
         f"❓ Без цены/времени: {'показывать' if c.unknown_ok else 'скрывать'}",
+        "🧮 Тарифы ₽/км: " + " / ".join(str(c.rates[t]) for t in TARIFFS) + f" · срочность +{c.urgent_pct}%",
     ])
 
 
@@ -162,8 +185,27 @@ def settings_buttons():
         [Button.inline("💰 Сумма", b"set:min_price"), Button.inline("📍 Откуда", b"set:from"),
          Button.inline("🏁 Куда", b"set:to")],
         [Button.inline("⏱ Время", b"set:time"), Button.inline("❓ Неизвестное", b"set:unknown")],
-        [Button.inline("⏸ Пауза" if cfg.enabled else "▶️ Включить", b"set:enabled")],
+        [Button.inline("🧮 Тарифы", b"set:rates"),
+         Button.inline("⏸ Пауза" if cfg.enabled else "▶️ Включить", b"set:enabled")],
     ]
+
+
+TARIFFS = ["Стандарт", "Комфорт", "Комфорт+", "Минивэн"]
+
+
+def rates_text() -> str:
+    lines = ["🧮 Тарифы калькулятора (₽/км)"]
+    lines += [f"{t}: {cfg.rates[t]}" for t in TARIFFS]
+    lines.append(f"Срочность: +{cfg.urgent_pct}%")
+    lines.append("\nНажмите на тариф, чтобы изменить цену за километр.")
+    return "\n".join(lines)
+
+
+def rates_buttons():
+    rows = [[Button.inline(f"{t}: {cfg.rates[t]}", f"rate:{t}".encode())] for t in TARIFFS]
+    rows.append([Button.inline(f"Срочность: +{cfg.urgent_pct}%", b"rate:urgent")])
+    rows.append([Button.inline("← Назад", b"set:back")])
+    return rows
 
 
 BTN_SETTINGS = "⚙️ Настройки"
@@ -188,6 +230,8 @@ PROMPTS = {
     "from": "Отправьте города отправления через запятую (например: Ростов, Батайск, Аксай). «-» сбросит.",
     "to": "Отправьте города назначения через запятую. «-» сбросит.",
     "time_hours": "Отправьте число часов (1–72): показывать заказы с подачей в ближайшие N часов.",
+    "rate": "Отправьте новую цену за километр (₽), например 28.",
+    "urgent": "Отправьте надбавку за срочность в процентах, например 20.",
 }
 
 
@@ -221,12 +265,25 @@ async def on_owner_message(event: events.NewMessage.Event) -> None:
         elif key == "time_hours":
             cfg.time_hours = max(1, min(72, int(text)))
             cfg.time_mode = "within"
+        elif key.startswith("rate:"):
+            val = float(text.replace(",", "."))
+            if not 0 < val <= 1000:
+                raise ValueError
+            val = int(val) if val.is_integer() else val
+            target = key.split(":", 1)[1]
+            if target == "urgent":
+                cfg.urgent_pct = int(val)
+            else:
+                cfg.rates[target] = val
     except ValueError:
         pending = key
         await event.respond("Не понял, отправьте число.")
         return
     settings_store.save(cfg)
-    await event.respond("✅ Сохранено\n\n" + settings_text(), buttons=settings_buttons())
+    if key.startswith("rate:"):
+        await event.respond("✅ Сохранено\n\n" + rates_text(), buttons=rates_buttons())
+    else:
+        await event.respond("✅ Сохранено\n\n" + settings_text(), buttons=settings_buttons())
 
 
 @bot.on(events.CallbackQuery)
@@ -244,6 +301,12 @@ async def on_callback(event: events.CallbackQuery.Event) -> None:
         if raw:
             await bot.send_message(OWNER_ID, "Перешлите это сообщение разработчику:\n\n" + raw)
         return
+    if data.startswith(b"rate:"):
+        target = data.decode().split(":", 1)[1]
+        pending = f"rate:{target}"
+        await event.answer()
+        await bot.send_message(OWNER_ID, PROMPTS["urgent" if target == "urgent" else "rate"])
+        return
     if not data.startswith(b"set:"):
         return
 
@@ -252,6 +315,12 @@ async def on_callback(event: events.CallbackQuery.Event) -> None:
         pending = action
         await event.answer()
         await bot.send_message(OWNER_ID, PROMPTS[action])
+        return
+    if action == "rates":
+        await event.edit(rates_text(), buttons=rates_buttons())
+        return
+    if action == "back":
+        await event.edit(settings_text(), buttons=settings_buttons())
         return
     if action == "time":
         order = ["any", "urgent", "within"]

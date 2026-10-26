@@ -5,6 +5,9 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 
+# Обычные тарифы ₽/км, как в SWTCalcBot
+DEFAULT_RATES = {"Стандарт": 27, "Комфорт": 30, "Комфорт+": 35, "Минивэн": 50}
+
 DATA_DIR = os.environ.get("DATA_DIR", "data")
 PATH = os.path.join(DATA_DIR, "settings.json")
 
@@ -18,6 +21,8 @@ class Settings:
     time_mode: str = "any"      # any | urgent | within
     time_hours: int = 3
     unknown_ok: bool = False    # показывать заказы, где цену/время нельзя проверить
+    rates: dict = field(default_factory=lambda: dict(DEFAULT_RATES))
+    urgent_pct: int = 20        # надбавка за срочность, %
 
 
 def load() -> Settings:
@@ -25,7 +30,9 @@ def load() -> Settings:
         with open(PATH, encoding="utf-8") as f:
             data = json.load(f)
         known = Settings.__dataclass_fields__
-        return Settings(**{k: v for k, v in data.items() if k in known})
+        st = Settings(**{k: v for k, v in data.items() if k in known})
+        st.rates = {**DEFAULT_RATES, **st.rates}
+        return st
     except (FileNotFoundError, ValueError, TypeError):
         return Settings()
 
