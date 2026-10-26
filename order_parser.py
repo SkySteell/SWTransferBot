@@ -51,6 +51,8 @@ NOISE = [
     r"\+?\s*платк\w*",
     r"платн\w+\s+дорог\w*",
     r"с\s+предоплатой",
+    r"\d+\s*адрес\w*",
+    r"(?<!\w)водител\w*",
     r"(?<!\w)(?:комфорт\s*\+|стандарт|комфорт|минивэн|минивен|эконом|бизнес|вип|vip)(?!\w)",
 ]
 
@@ -134,6 +136,8 @@ def extract_price(text: str) -> tuple[Optional[int], Optional[str]]:
         kind = "на руки"
     elif re.search(r"общ(?:ее|ая|ий)", text, re.I):
         kind = "общее"
+    elif re.search(r"водител", text, re.I):
+        kind = "водителю"
     return price, kind
 
 
@@ -178,19 +182,30 @@ def extract_class(text: str) -> Optional[str]:
     return None
 
 
+PREP_RE = re.compile(r"^(?:из|от|в|во|до)\s+", re.I)
+STATION_RE = re.compile(
+    r"\s+(?:ж/?д\s+вокзал\w*|жд\s+вокзал\w*|автовокзал\w*|вокзал\w*|аэропорт\w*|ж/д)$", re.I)
+
+
+def strip_prep(s: str) -> str:
+    return PREP_RE.sub("", s.strip()).strip()
+
+
 def clean_line(line: str) -> str:
     t = _remove(line, EXTRACT_TOKENS)
     for p in NOISE:
         t = re.sub(p, " ", t, flags=re.I)
-    t = re.sub(r";", " ", t)
+    t = re.sub(r"[;…]", " , ", t)
+    t = re.sub(r"(?:\s*,\s*){2,}", ", ", t)
     t = re.sub(r"\s+", " ", t).strip(" ,.;:|-–—")
+    t = strip_prep(t)
     if t.lower() in {"нет", "да"} or len(re.findall(r"[A-Za-zА-Яа-яЁё]", t)) < 2:
         return ""
     return t
 
 
 def parse_place(raw: str) -> tuple[str, Optional[str]]:
-    s = re.sub(r"\s+адрес\s*$", "", raw.strip(), flags=re.I).strip(" ,.")
+    s = re.sub(r"\s+адрес\s*$", "", strip_prep(raw), flags=re.I).strip(" ,.")
     s = PLACE_PREFIX_RE.sub("", s)
     hint = None
     m = re.search(r"\(([^)]*)\)", s)
@@ -201,7 +216,7 @@ def parse_place(raw: str) -> tuple[str, Optional[str]]:
     if m:
         hint = hint or m.group(1)
         s = s[:m.start()].strip()
-    city = s.split(",")[0].strip(" ,.")
+    city = STATION_RE.sub("", s.split(",")[0].strip(" ,.")).strip(" ,.")
     if city.isupper():
         city = city.capitalize()
     return city, hint
@@ -211,7 +226,7 @@ def find_route(lines: list[str]) -> tuple[Optional[str], Optional[str], str]:
     cl = [c for c in (clean_line(ln) for ln in lines) if c]
     for i, c in enumerate(cl):
         if "→" in c:
-            left, right = (p.strip(" ,.-–—") for p in c.split("→", 1))
+            left, right = (strip_prep(p.strip(" ,.-–—")) for p in c.split("→", 1))
             if not left and i > 0:
                 left = cl[i - 1]
             if not right and i + 1 < len(cl):
@@ -221,7 +236,7 @@ def find_route(lines: list[str]) -> tuple[Optional[str], Optional[str], str]:
     for c in cl:
         parts = re.split(r"\s+[-–—]\s+|\s*[–—]\s*", c, maxsplit=1)
         if len(parts) == 2 and all(p.strip() for p in parts):
-            return parts[0].strip(), parts[1].strip(), "high"
+            return strip_prep(parts[0]), strip_prep(parts[1]), "high"
     if len(cl) >= 2:
         return cl[0], cl[1], ("medium" if len(cl) == 2 else "low")
     return None, None, "low"
@@ -270,6 +285,9 @@ def parse_order(text: str, allow_unrouted: bool = False) -> Optional[Order]:
         return None
 
     comment = labeled.get("comment")
+    if not comment:
+        am = re.search(r"\d+\s*адрес\w*", full, re.I)
+        comment = am.group(0) if am else None
     if comment and len(re.findall(r"[A-Za-zА-Яа-яЁё]", re.sub(PASS, "", comment, flags=re.I))) < 3:
         comment = None
 

@@ -55,16 +55,40 @@ def hint_norm(h: str) -> str:
     return h[:1].upper() + h[1:]
 
 
+def _alias_for(word: str) -> Optional[str]:
+    for key, val in ALIASES.items():
+        if word == key or (len(key) >= 5 and word.startswith(key) and len(word) - len(key) <= 2):
+            return val
+    return None
+
+
+def declension_variants(city: str) -> list[str]:
+    """Запасные формы названия: Москву -> Москва, Ростова -> Ростов, Казани -> Казань."""
+    w = city.strip()
+    low = w.lower()
+    if " " in w or "-" in w or len(w) < 5:
+        return []
+    out = []
+    if low.endswith(("у", "ы", "е")):
+        out.append(w[:-1] + "а")
+    if low.endswith("а"):
+        out.append(w[:-1])
+    if low.endswith("и"):
+        out.append(w[:-1] + "ь")
+    return out
+
+
 def place_queries(city: str, hint: Optional[str]) -> list[str]:
     words = norm(city).split()
-    if words and words[0] in ALIASES and (
-            len(words) == 1 or (len(words) == 2 and words[1] in DISTRICT_WORDS)):
-        return [ALIASES[words[0]]]
+    if words:
+        alias = _alias_for(words[0])
+        if alias and (len(words) == 1 or (len(words) == 2 and words[1] in DISTRICT_WORDS)):
+            return [alias]
     qs = []
     if hint:
         qs.append(f"{city}, {hint_norm(hint)}")
     qs.append(city)
-    return qs
+    return qs + declension_variants(city)
 
 
 @dataclass
