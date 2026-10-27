@@ -23,7 +23,7 @@ def format_calc(res: Optional[CalcResult], o: Order) -> str:
     line = f"🧮 Калькулятор ({res.tariff}): {_money(res.calc_price)} ₽ · {res.km:.0f} км"
     if res.km_source == "км из заказа":
         line += " (км из заказа)"
-    if res.urgent:
+    if res.urgent and res.urgent_pct:
         line += f", срочная +{res.urgent_pct}%"
     if res.diff is not None:
         pct = res.diff / res.calc_price * 100 if res.calc_price else 0
@@ -64,6 +64,8 @@ def format_card(o: Order, dispatcher: str, group: str, calc_text: Optional[str] 
 
     if o.tolls == "extra":
         lines.append("🛣 + платные дороги сверху")
+    elif o.tolls == "client":
+        lines.append("🛣 платные дороги оплачивает клиент")
     elif o.tolls == "mentioned":
         lines.append("🛣 платные дороги упомянуты")
     if o.percent:
@@ -81,6 +83,6 @@ def format_card(o: Order, dispatcher: str, group: str, calc_text: Optional[str] 
         lines.append(calc_text)
     lines.append(f"👤 Диспетчер: {dispatcher}")
     lines.append(f"👥 Группа: {group}")
-    if o.route_confidence in ("medium", "low"):
+    if o.route_confidence == "low":
         lines.append("⚠️ Маршрут определён неуверенно, проверьте по источнику")
     return "\n".join(lines)
