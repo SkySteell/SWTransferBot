@@ -18,13 +18,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from telethon import Button, TelegramClient, events
+from telethon.errors import MessageNotModifiedError
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel, User
 
+import groups as groups_store
 import settings as settings_store
 from calc import Geo, calculate
 from cards import format_calc, format_card
-from filters import passes
+from filters import merge_cities, passes
 from order_parser import Order, parse_order
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -46,6 +48,8 @@ bot = TelegramClient(StringSession(), API_ID, API_HASH)
 cfg = settings_store.load()
 geo = Geo(os.path.join(settings_store.DATA_DIR, "geocache.json"))
 bg_tasks: set = set()
+groups = groups_store.load()          # все группы и каналы аккаунта {id: {title, kind}}
+group_stats: Counter = Counter()  # сколько заказов распознано по группам с запуска
 seen: dict[str, float] = {}
 raw_texts: "OrderedDict[int, str]" = OrderedDict()
 stats: Counter = Counter()
@@ -94,6 +98,21 @@ def who(sender, msg) -> tuple[str, Optional[str]]:
     return name, username
 
 
+async def refresh_groups() -> int:
+    """Читает все диалоги аккаунта и собирает список групп и каналов."""
+    found: dict[int, dict] = {}
+    async for d in user.iter_dialogs():
+        if d.is_user:
+            continue
+        if d.is_group or d.is_channel:
+            found[d.id] = {"title": d.name or str(d.id), "kind": "группа" if d.is_group else "канал"}
+    if found:
+        groups.clear()
+        groups.update(found)
+        groups_store.save(groups)
+    return len(groups)
+
+
 async def attach_calc(sent, order: Order, name: str, group: str, rows) -> None:
     """Считает стоимость по калькулятору и дописывает её в уже отправленную карточку."""
     try:
@@ -115,11 +134,23 @@ async def attach_calc(sent, order: Order, name: str, group: str, rows) -> None:
 async def on_message(event: events.NewMessage.Event) -> None:
     if event.is_private or not event.raw_text:
         return
+    cid = event.chat_id
+    if cid not in groups:   # вступили в новую группу после запуска
+        try:
+            chat = await event.get_chat()
+            groups[cid] = {"title": getattr(chat, "title", None) or str(cid),
+                           "kind": "канал" if getattr(chat, "broadcast", False) else "группа"}
+            groups_store.save(groups)
+        except Exception:
+            pass
+    if cid in cfg.muted_chats:
+        return
     try:
         order = parse_order(event.raw_text, allow_unrouted=bool(cfg.from_cities or cfg.to_cities))
         if order is None:
             return
         stats["заказов распознано"] += 1
+        group_stats[cid] += 1
         ok, reason = passes(order, cfg, datetime.now(TZ))
         if not ok:
             stats[f"отсеяно: {reason}"] += 1
@@ -174,8 +205,12 @@ def settings_text() -> str:
         f"💰 Мин. сумма: {f'{c.min_price:,}'.replace(',', ' ') + ' ₽' if c.min_price else 'не задана'}",
         f"📍 Откуда: {', '.join(c.from_cities) if c.from_cities else 'любые'}",
         f"🏁 Куда: {', '.join(c.to_cities) if c.to_cities else 'любые'}",
+        *(["   ↔️ ищу: из «Откуда» куда угодно, откуда угодно в «Куда», и между ними"]
+          if c.from_cities and c.to_cities else []),
         f"⏱ Время подачи: {time_line}",
         f"❓ Без цены/времени: {'показывать' if c.unknown_ok else 'скрывать'}",
+        f"📋 Группы: мониторится {groups_store.active_count(groups, cfg.muted_chats)} из {len(groups)}"
+        if groups else "📋 Группы: список появится после запуска",
         "🧮 Тарифы ₽/км: " + " / ".join(str(c.rates[t]) for t in TARIFFS) + f" · срочность +{c.urgent_pct}%",
     ])
 
@@ -185,8 +220,8 @@ def settings_buttons():
         [Button.inline("💰 Сумма", b"set:min_price"), Button.inline("📍 Откуда", b"set:from"),
          Button.inline("🏁 Куда", b"set:to")],
         [Button.inline("⏱ Время", b"set:time"), Button.inline("❓ Неизвестное", b"set:unknown")],
-        [Button.inline("🧮 Тарифы", b"set:rates"),
-         Button.inline("⏸ Пауза" if cfg.enabled else "▶️ Включить", b"set:enabled")],
+        [Button.inline("📋 Группы", b"set:groups"), Button.inline("🧮 Тарифы", b"set:rates")],
+        [Button.inline("⏸ Пауза" if cfg.enabled else "▶️ Включить", b"set:enabled")],
     ]
 
 
@@ -208,6 +243,85 @@ def rates_buttons():
     return rows
 
 
+def groups_text() -> str:
+    return "\n".join([
+        "📋 Группы и каналы аккаунта",
+        f"Мониторится: {groups_store.active_count(groups, cfg.muted_chats)} из {len(groups)}",
+        "✅ слушаем, ⬜ отключено. Нажмите на название, чтобы переключить.",
+        "Число в скобках: сколько заказов распознано из группы с запуска.",
+    ])
+
+
+def groups_buttons(page: int):
+    items, page = groups_store.page_items(groups, page)
+    pages = groups_store.page_count(len(groups))
+    rows = []
+    for cid, g in items:
+        mark = "⬜" if cid in cfg.muted_chats else "✅"
+        n = group_stats.get(cid)
+        label = f"{mark} {groups_store.short(g.get('title'))}" + (f" ({n})" if n else "")
+        rows.append([Button.inline(label, f"gt:{page}:{cid}".encode())])
+    nav = []
+    if page > 0:
+        nav.append(Button.inline("◀️", f"gp:{page - 1}".encode()))
+    nav.append(Button.inline(f"{page + 1}/{pages}", b"noop"))
+    if page < pages - 1:
+        nav.append(Button.inline("▶️", f"gp:{page + 1}".encode()))
+    rows.append(nav)
+    rows.append([Button.inline("✅ Все", f"ga:1:{page}".encode()),
+                 Button.inline("⬜ Ни одной", f"ga:0:{page}".encode()),
+                 Button.inline("🔄 Обновить", f"gr:{page}".encode())])
+    rows.append([Button.inline("← Назад", b"set:back")])
+    return rows
+
+
+async def show_groups(event, page: int) -> None:
+    try:
+        await event.edit(groups_text(), buttons=groups_buttons(page))
+    except MessageNotModifiedError:
+        pass
+
+
+async def handle_groups_cb(event, data: bytes) -> bool:
+    parts = data.decode().split(":")
+    kind = parts[0]
+    if kind == "noop":
+        await event.answer()
+    elif kind == "gp":
+        await event.answer()
+        await show_groups(event, int(parts[1]))
+    elif kind == "gt":
+        await event.answer()
+        cfg.muted_chats = groups_store.toggle(cfg.muted_chats, int(parts[2]))
+        settings_store.save(cfg)
+        await show_groups(event, int(parts[1]))
+    elif kind == "ga":
+        await event.answer()
+        cfg.muted_chats = [] if parts[1] == "1" else list(groups.keys())
+        settings_store.save(cfg)
+        await show_groups(event, int(parts[2]))
+    elif kind == "gr":
+        await event.answer("Обновляю список…")
+        try:
+            await refresh_groups()
+        except Exception:
+            log.exception("Не удалось обновить список групп")
+        await show_groups(event, int(parts[1]))
+    else:
+        return False
+    return True
+
+
+def prompt_text(action: str) -> str:
+    if action not in {"from", "to"}:
+        return PROMPTS[action]
+    current = cfg.from_cities if action == "from" else cfg.to_cities
+    return (PROMPTS[action]
+            + f"\n\nСейчас: {', '.join(current) if current else 'пусто (любые)'}"
+            + "\nУдалить город: напишите его с минусом, например -Батайск."
+            + "\nОчистить весь список: отправьте «-».")
+
+
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_STATS = "📊 Статистика"
 MAIN_KB = [[Button.text(BTN_SETTINGS, resize=True), Button.text(BTN_STATS, resize=True)]]
@@ -227,8 +341,8 @@ def parse_list(text: str) -> list[str]:
 
 PROMPTS = {
     "min_price": "Отправьте минимальную сумму числом (например 5000). «-» сбросит.",
-    "from": "Отправьте города отправления через запятую (например: Ростов, Батайск, Аксай). «-» сбросит.",
-    "to": "Отправьте города назначения через запятую. «-» сбросит.",
+    "from": "Отправьте города отправления через запятую (например: Ростов, Батайск). Они добавятся к списку.",
+    "to": "Отправьте города назначения через запятую. Они добавятся к списку.",
     "time_hours": "Отправьте число часов (1–72): показывать заказы с подачей в ближайшие N часов.",
     "rate": "Отправьте новую цену за километр (₽), например 28.",
     "urgent": "Отправьте надбавку за срочность в процентах, например 20.",
@@ -259,9 +373,9 @@ async def on_owner_message(event: events.NewMessage.Event) -> None:
             digits = "".join(ch for ch in text if ch.isdigit())
             cfg.min_price = int(digits) if digits and text != "-" else 0
         elif key == "from":
-            cfg.from_cities = parse_list(text)
+            cfg.from_cities = merge_cities(cfg.from_cities, text)
         elif key == "to":
-            cfg.to_cities = parse_list(text)
+            cfg.to_cities = merge_cities(cfg.to_cities, text)
         elif key == "time_hours":
             cfg.time_hours = max(1, min(72, int(text)))
             cfg.time_mode = "within"
@@ -301,6 +415,9 @@ async def on_callback(event: events.CallbackQuery.Event) -> None:
         if raw:
             await bot.send_message(OWNER_ID, "Перешлите это сообщение разработчику:\n\n" + raw)
         return
+    if data.split(b":")[0] in {b"noop", b"gp", b"gt", b"ga", b"gr"}:
+        await handle_groups_cb(event, data)
+        return
     if data.startswith(b"rate:"):
         target = data.decode().split(":", 1)[1]
         pending = f"rate:{target}"
@@ -314,13 +431,27 @@ async def on_callback(event: events.CallbackQuery.Event) -> None:
     if action in {"min_price", "from", "to"}:
         pending = action
         await event.answer()
-        await bot.send_message(OWNER_ID, PROMPTS[action])
+        await bot.send_message(OWNER_ID, prompt_text(action))
+        return
+    if action == "groups":
+        await event.answer()
+        if not groups:
+            try:
+                await refresh_groups()
+            except Exception:
+                log.exception("Не удалось получить список групп")
+        await show_groups(event, 0)
         return
     if action == "rates":
+        await event.answer()
         await event.edit(rates_text(), buttons=rates_buttons())
         return
     if action == "back":
-        await event.edit(settings_text(), buttons=settings_buttons())
+        await event.answer()
+        try:
+            await event.edit(settings_text(), buttons=settings_buttons())
+        except MessageNotModifiedError:
+            pass
         return
     if action == "time":
         order = ["any", "urgent", "within"]
@@ -333,6 +464,7 @@ async def on_callback(event: events.CallbackQuery.Event) -> None:
     elif action == "enabled":
         cfg.enabled = not cfg.enabled
     settings_store.save(cfg)
+    await event.answer()
     await event.edit(settings_text(), buttons=settings_buttons())
 
 
@@ -342,7 +474,16 @@ async def main() -> None:
         raise SystemExit("SESSION_STRING недействителен: создайте новый через make_session.py")
     await bot.start(bot_token=BOT_TOKEN)
     try:
-        await bot.send_message(OWNER_ID, "✅ Бот запущен. Настройки и статистика: кнопки внизу экрана.", buttons=MAIN_KB)
+        total = await refresh_groups()
+    except Exception:
+        log.exception("Не удалось получить список групп")
+        total = len(groups)
+    try:
+        await bot.send_message(
+            OWNER_ID,
+            f"✅ Бот запущен. Найдено групп и каналов: {total}.\n"
+            "Отключить лишние: «⚙️ Настройки», затем «📋 Группы».",
+            buttons=MAIN_KB)
     except Exception:
         log.warning("Не удалось написать владельцу: откройте бота и нажмите /start")
     log.info("Запущено")

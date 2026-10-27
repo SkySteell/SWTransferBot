@@ -48,6 +48,24 @@ def text_has_city(text: str, wanted: list[str]) -> bool:
     return any(re.search(_stem_pattern(w), t) for w in ws)
 
 
+def merge_cities(current: list[str], text: str) -> list[str]:
+    """Список пополняется: новые города добавляются, «-Город» удаляет, «-» очищает весь список."""
+    t = text.strip()
+    if t.lower() in {"-", "–", "—", "0", "нет", "сброс"}:
+        return []
+    result = list(current)
+    for item in re.split(r"[,;\n]", t):
+        item = item.strip()
+        if not item:
+            continue
+        if item[0] in "-–—" and item.lstrip("-–— ").strip():
+            name = norm(item.lstrip("-–— "))
+            result = [c for c in result if norm(c) != name]
+        elif norm(item) and norm(item) not in {norm(c) for c in result}:
+            result.append(item)
+    return result
+
+
 def pickup_datetime(o: Order, now: datetime) -> Optional[datetime]:
     """Когда подача. None, если время определить нельзя."""
     if o.urgent:
@@ -81,10 +99,13 @@ def pickup_datetime(o: Order, now: datetime) -> Optional[datetime]:
                 shift = {"сегодня": 0, "завтра": 1, "послезавтра": 2}[w.group(1).lower()]
                 day = now.date() + timedelta(days=shift)
         if day is not None:
-            return datetime.combine(day, time(hh, mm), tzinfo=now.tzinfo)
-        dt = datetime.combine(now.date(), time(hh, mm), tzinfo=now.tzinfo)
-        if dt < now - timedelta(minutes=30):
-            dt += timedelta(days=1)
+            dt = datetime.combine(day, time(hh, mm), tzinfo=now.tzinfo)
+        else:
+            dt = datetime.combine(now.date(), time(hh, mm), tzinfo=now.tzinfo)
+            if dt < now - timedelta(minutes=30):
+                dt += timedelta(days=1)
+        if "ночью" in t.lower() and hh < 6 and dt.date() == now.date() and now.hour >= 12:
+            dt += timedelta(days=1)         # «сегодня ночью с 1:00», написано вечером
         return dt
     except ValueError:
         return None
@@ -99,17 +120,18 @@ def passes(o: Order, s: Settings, now: datetime) -> tuple[bool, str]:
                 return False, "нет цены"
         elif o.price < s.min_price:
             return False, "цена ниже минимума"
-    directional = o.route_confidence in ("high", "medium")
-    if directional:
-        from_ok = city_match([o.from_city, o.from_raw], s.from_cities)
-        to_ok = city_match([o.to_city, o.to_raw], s.to_cities)
-    else:   # маршрут не разобран уверенно: города ищутся просто в тексте
-        from_ok = text_has_city(o.raw_text, s.from_cities)
-        to_ok = text_has_city(o.raw_text, s.to_cities)
-    if not from_ok:
-        return False, "город отправления"
-    if not to_ok:
-        return False, "город назначения"
+    # Города: из А куда угодно, откуда угодно в Б, и из А в Б (достаточно любого совпадения)
+    if s.from_cities or s.to_cities:
+        directional = o.route_confidence in ("high", "medium")
+        from_ok = to_ok = False
+        if s.from_cities:
+            from_ok = (city_match([o.from_city, o.from_raw], s.from_cities) if directional
+                       else text_has_city(o.raw_text, s.from_cities))
+        if s.to_cities:
+            to_ok = (city_match([o.to_city, o.to_raw], s.to_cities) if directional
+                     else text_has_city(o.raw_text, s.to_cities))
+        if not (from_ok or to_ok):
+            return False, "города не совпали"
     if s.time_mode == "urgent":
         if not o.urgent and not (s.unknown_ok and not o.time_text):
             return False, "не срочный"

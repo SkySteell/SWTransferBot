@@ -23,6 +23,7 @@ class Settings:
     unknown_ok: bool = False    # показывать заказы, где цену/время нельзя проверить
     rates: dict = field(default_factory=lambda: dict(DEFAULT_RATES))
     urgent_pct: int = 20        # надбавка за срочность, %
+    muted_chats: list = field(default_factory=list)   # id групп, которые не мониторим
 
 
 def load() -> Settings:

@@ -27,8 +27,11 @@ def format_calc(res: Optional[CalcResult], o: Order) -> str:
         line += f", срочная +{res.urgent_pct}%"
     if res.diff is not None:
         pct = res.diff / res.calc_price * 100 if res.calc_price else 0
-        sign = "🟢 +" if res.diff >= 0 else "🔴 −"
-        line += f"\n📊 Разница: {sign}{_money(abs(res.diff))} ₽ ({pct:+.0f}%)"
+        if abs(pct) < 1:
+            line += f"\n📊 Разница: ⚪ {'+' if res.diff >= 0 else '−'}{_money(abs(res.diff))} ₽ (≈0%, цена совпала)"
+        else:
+            sign = "🟢 +" if res.diff >= 0 else "🔴 −"
+            line += f"\n📊 Разница: {sign}{_money(abs(res.diff))} ₽ ({pct:+.0f}%)"
     if o.tolls == "extra":
         line += "\n   (платные дороги не учтены ни в заказе, ни в расчёте)"
     return line
@@ -65,6 +68,8 @@ def format_card(o: Order, dispatcher: str, group: str, calc_text: Optional[str] 
         lines.append("🛣 платные дороги упомянуты")
     if o.percent:
         lines.append(f"📌 в заказе указано {o.percent}%")
+    if o.commission_rub:
+        lines.append(f"📌 после цены указано {_money(o.commission_rub)} ₽ (возможно комиссия)")
     if o.car_class:
         lines.append(f"🚗 Класс: {o.car_class}")
     if o.distance_km:

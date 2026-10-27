@@ -66,6 +66,15 @@ def declension_variants(city: str) -> list[str]:
     """Запасные формы названия: Москву -> Москва, Ростова -> Ростов, Казани -> Казань."""
     w = city.strip()
     low = w.lower()
+    if w.count(" ") == 1 and "-" not in w:      # «красного десанта» -> «красный десант»
+        a, b = w.split()
+        a2 = (a[:-3] + "ый" if a.lower().endswith("ого") else
+              a[:-3] + "ий" if a.lower().endswith("его") else
+              a[:-2] + "ая" if a.lower().endswith("ой") else a)
+        b2 = (b[:-1] + "а" if b.lower().endswith(("ы", "у")) else
+              b[:-1] if b.lower().endswith("а") else b)
+        variant = f"{a2} {b2}"
+        return [variant] if variant != w else []
     if " " in w or "-" in w or len(w) < 5:
         return []
     out = []
@@ -78,14 +87,27 @@ def declension_variants(city: str) -> list[str]:
     return out
 
 
+FULL_ALIASES = {"ростов на дону": "Ростов-на-Дону", "санкт петербург": "Санкт-Петербург"}
+REGION_WORDS = ("обл", "респ", "край", "район", "р н", "р он", "округ", "лнр", "днр", "хнр", "знр")
+
+
+def _is_region_hint(hint: str) -> bool:
+    """Подсказка в скобках помогает карте, только если это регион («место по согласованию» не годится)."""
+    h = norm(hint)
+    return any(w in h for w in REGION_WORDS)
+
+
 def place_queries(city: str, hint: Optional[str]) -> list[str]:
+    if norm(city) in FULL_ALIASES:
+        return [FULL_ALIASES[norm(city)]]
     words = norm(city).split()
     if words:
         alias = _alias_for(words[0])
-        if alias and (len(words) == 1 or (len(words) == 2 and words[1] in DISTRICT_WORDS)):
+        if alias and (len(words) == 1 or (len(words) == 2 and words[1] in DISTRICT_WORDS)
+                      or (len(words) >= 3 and words[1] == "на" and words[2] != "дону")):
             return [alias]
     qs = []
-    if hint:
+    if hint and _is_region_hint(hint):
         qs.append(f"{city}, {hint_norm(hint)}")
     qs.append(city)
     return qs + declension_variants(city)
