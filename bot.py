@@ -25,7 +25,7 @@ from telethon.tl.types import Channel, User
 import groups as groups_store
 import settings as settings_store
 from calc import Geo, calculate
-from cards import format_calc, format_card
+from cards import format_card
 from filters import merge_cities, passes
 from order_parser import Order, parse_order
 
@@ -113,15 +113,15 @@ async def refresh_groups() -> int:
     return len(groups)
 
 
-async def attach_calc(sent, order: Order, name: str, group: str, rows) -> None:
+async def attach_calc(sent, order: Order, dispatcher: str, group: str, rows) -> None:
     """Считает стоимость по калькулятору и дописывает её в уже отправленную карточку."""
     try:
         res = await asyncio.wait_for(calculate(order, cfg.rates, cfg.urgent_pct, geo), timeout=60)
         stats["расчёт выполнен" if res.ok else "расчёт невозможен"] += 1
-        text = format_card(order, name, group, format_calc(res, order))
+        text = format_card(order, dispatcher, group, res)
     except Exception:
         log.exception("Ошибка расчёта")
-        text = format_card(order, name, group, "🧮 Расчёт невозможен: ошибка карты")
+        text = format_card(order, dispatcher, group, calc_error="ошибка карты")
     try:
         await sent.edit(text, buttons=rows, link_preview=False)
     except Exception:
@@ -161,7 +161,10 @@ async def on_message(event: events.NewMessage.Event) -> None:
 
         chat = await event.get_chat()
         sender = await event.get_sender()
-        name, username = who(sender, event.message)
+        _, sender_username = who(sender, event.message)
+        # настоящий диспетчер берётся из текста заказа, а не отправитель-бот (решение 30.10)
+        dispatcher = order.dispatcher or "-"
+        username = order.dispatcher_username or (None if getattr(sender, "bot", False) else sender_username)
         group = getattr(chat, "title", None) or "—"
 
         rows = []
@@ -176,14 +179,14 @@ async def on_message(event: events.NewMessage.Event) -> None:
         rows.append([Button.inline("🙈 Скрыть", b"hide"), Button.inline("⚠️ Ошибка", b"bad")])
 
         sent = await bot.send_message(
-            OWNER_ID, format_card(order, name, group, format_calc(None, order)),
+            OWNER_ID, format_card(order, dispatcher, group, None),
             buttons=rows, link_preview=False,
         )
         stats["отправлено"] += 1
         raw_texts[sent.id] = event.raw_text
         while len(raw_texts) > RAW_KEEP:
             raw_texts.popitem(last=False)
-        task = asyncio.create_task(attach_calc(sent, order, name, group, rows))
+        task = asyncio.create_task(attach_calc(sent, order, dispatcher, group, rows))
         bg_tasks.add(task)
         task.add_done_callback(bg_tasks.discard)
     except Exception:
