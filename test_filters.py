@@ -59,5 +59,12 @@ bad += check("откуда Москва: «Ростов Москва»", parse_o
 bad += check("куда Москва: «Москва-Ростов»", parse_order("Москва-Ростов 5000 сегодня 17:00"), Settings(to_cities=["Москва"]), False)
 bad += check("куда Москва: «из Москвы в Ростов» без разметки", parse_order("Кто едет из Москвы в Ростов? сегодня 17:00 5000", allow_unrouted=True), Settings(to_cities=["Москва"]), False)
 bad += check("откуда Москва: «из Москвы в Ростов» без разметки", parse_order("Кто едет из Москвы в Ростов? сегодня 17:00 5000", allow_unrouted=True), Settings(from_cities=["Москва"]), True)
+q = parse_order('Женщины спрашивает сегодня или завтра из Таганрога Горловку кто и сколько в личку', allow_unrouted=True)
+bad += 0 if q is None else 1
+print("OK  " if q is None else "FAIL", "вопрос в чате без цены и маршрута не заказ")
+bad += check("откуда Ростов-на-Дону: «Ростова»", parse_order("Из Ростова в Москву 9000 сегодня 17:00"), Settings(from_cities=["Ростов-на-Дону"]), True)
+bad += check("откуда Ростов: «Ростов на Дону»", parse_order("Ростов на Дону - Москва 9000 сегодня 17:00"), Settings(from_cities=["Ростов"]), True)
+bad += check("откуда Ростов: не Ростовская область", parse_order("Ростовская область, Волгодонск → Москва 9000 сегодня 17:00"), Settings(from_cities=["Ростов"]), False)
+bad += check("куда РнД: «Москва Ростова» (текст)", parse_order("Москва Ростова 9000 сегодня 17:00"), Settings(to_cities=["РнД"]), True)
 print("\nПровалено:", bad)
 raise SystemExit(bad)

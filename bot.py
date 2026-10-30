@@ -14,6 +14,7 @@ import logging
 import os
 import time
 from collections import Counter, OrderedDict
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -50,7 +51,7 @@ geo = Geo(os.path.join(settings_store.DATA_DIR, "geocache.json"))
 bg_tasks: set = set()
 groups = groups_store.load()          # все группы и каналы аккаунта {id: {title, kind}}
 group_stats: Counter = Counter()  # сколько заказов распознано по группам с запуска
-seen: dict[str, float] = {}
+seen: "dict[str, Seen]" = {}   # заказ -> отправленная карточка и группы, где он замечен
 raw_texts: "OrderedDict[int, str]" = OrderedDict()
 stats: Counter = Counter()
 pending: Optional[str] = None   # какую настройку владелец сейчас вводит
@@ -66,15 +67,39 @@ def dedupe_key(o: Order) -> str:
     return hashlib.sha1(base.encode()).hexdigest()
 
 
-def is_duplicate(o: Order) -> bool:
+@dataclass
+class Seen:
+    """Заказ, по которому уже отправлена карточка: нужен, чтобы дописывать «(+N групп)» в ту же карточку."""
+    t: float
+    order: Order
+    dispatcher: str = "-"
+    group: str = ""
+    rows: list = field(default_factory=list)
+    chats: dict = field(default_factory=dict)      # id группы -> название (первая группа первой)
+    sent: object = None
+    res: object = None                             # результат расчёта, пока None карточка показывает «Считаю…»
+    calc_error: Optional[str] = None
+
+
+def find_seen(o: Order) -> Optional[Seen]:
     now = time.time()
-    for k in [k for k, t in seen.items() if now - t > DEDUPE_TTL]:
+    for k in [k for k, e in seen.items() if now - e.t > DEDUPE_TTL]:
         del seen[k]
-    key = dedupe_key(o)
-    if key in seen:
-        return True
-    seen[key] = now
-    return False
+    return seen.get(dedupe_key(o))
+
+
+def render_card(e: Seen) -> str:
+    return format_card(e.order, e.dispatcher, e.group, e.res,
+                       extra_groups=max(0, len(e.chats) - 1), calc_error=e.calc_error)
+
+
+async def refresh_card(e: Seen) -> None:
+    if e.sent is None:
+        return
+    try:
+        await e.sent.edit(render_card(e), buttons=e.rows, link_preview=False)
+    except Exception:
+        pass  # карточку могли скрыть или текст не изменился
 
 
 def source_link(chat, msg_id: int) -> Optional[str]:
@@ -113,19 +138,15 @@ async def refresh_groups() -> int:
     return len(groups)
 
 
-async def attach_calc(sent, order: Order, dispatcher: str, group: str, rows) -> None:
+async def attach_calc(e: Seen) -> None:
     """Считает стоимость по калькулятору и дописывает её в уже отправленную карточку."""
     try:
-        res = await asyncio.wait_for(calculate(order, cfg.rates, cfg.urgent_pct, geo), timeout=60)
-        stats["расчёт выполнен" if res.ok else "расчёт невозможен"] += 1
-        text = format_card(order, dispatcher, group, res)
+        e.res = await asyncio.wait_for(calculate(e.order, cfg.rates, cfg.urgent_pct, geo), timeout=60)
+        stats["расчёт выполнен" if e.res.ok else "расчёт невозможен"] += 1
     except Exception:
         log.exception("Ошибка расчёта")
-        text = format_card(order, dispatcher, group, calc_error="ошибка карты")
-    try:
-        await sent.edit(text, buttons=rows, link_preview=False)
-    except Exception:
-        pass  # карточку могли скрыть или изменить
+        e.calc_error = "ошибка карты"
+    await refresh_card(e)
 
 
 # ---------- чтение групп ----------
@@ -145,6 +166,7 @@ async def on_message(event: events.NewMessage.Event) -> None:
             pass
     if cid in cfg.muted_chats:
         return
+    entry = None
     try:
         order = parse_order(event.raw_text, allow_unrouted=bool(cfg.from_cities or cfg.to_cities))
         if order is None:
@@ -155,17 +177,24 @@ async def on_message(event: events.NewMessage.Event) -> None:
         if not ok:
             stats[f"отсеяно: {reason}"] += 1
             return
-        if is_duplicate(order):
-            stats["дублей"] += 1
-            return
-
         chat = await event.get_chat()
+        group = getattr(chat, "title", None) or "—"
+        entry = find_seen(order)
+        if entry is not None:
+            stats["дублей"] += 1
+            if cid not in entry.chats:          # тот же заказ в другой группе: «(+N групп)» в первой карточке
+                entry.chats[cid] = group
+                await refresh_card(entry)
+            return
+        entry = Seen(t=time.time(), order=order, chats={cid: group})
+        seen[dedupe_key(order)] = entry
+
         sender = await event.get_sender()
         _, sender_username = who(sender, event.message)
         # настоящий диспетчер берётся из текста заказа, а не отправитель-бот (решение 30.10)
         dispatcher = order.dispatcher or "-"
         username = order.dispatcher_username or (None if getattr(sender, "bot", False) else sender_username)
-        group = getattr(chat, "title", None) or "—"
+        entry.dispatcher, entry.group = dispatcher, group
 
         rows = []
         first = []
@@ -178,19 +207,22 @@ async def on_message(event: events.NewMessage.Event) -> None:
             rows.append(first)
         rows.append([Button.inline("🙈 Скрыть", b"hide"), Button.inline("⚠️ Ошибка", b"bad")])
 
+        entry.rows = rows
         sent = await bot.send_message(
-            OWNER_ID, format_card(order, dispatcher, group, None),
-            buttons=rows, link_preview=False,
+            OWNER_ID, render_card(entry), buttons=rows, link_preview=False,
         )
+        entry.sent = sent
         stats["отправлено"] += 1
         raw_texts[sent.id] = event.raw_text
         while len(raw_texts) > RAW_KEEP:
             raw_texts.popitem(last=False)
-        task = asyncio.create_task(attach_calc(sent, order, dispatcher, group, rows))
+        task = asyncio.create_task(attach_calc(entry))
         bg_tasks.add(task)
         task.add_done_callback(bg_tasks.discard)
     except Exception:
         log.exception("Ошибка обработки сообщения")
+        if entry is not None and entry.sent is None:
+            seen.pop(dedupe_key(entry.order), None)     # карточка не ушла: не прячем следующий такой же заказ
 
 
 # ---------- меню настроек ----------

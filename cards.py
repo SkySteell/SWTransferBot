@@ -8,7 +8,9 @@ from order_parser import Order
 
 
 def _place(raw: str) -> str:
-    return raw.capitalize() if raw.isupper() else raw
+    if raw.isupper():
+        return raw.capitalize()
+    return raw[:1].upper() + raw[1:]
 
 
 def _money(v: int) -> str:

@@ -5,7 +5,7 @@ import re
 from datetime import date, datetime, time, timedelta
 from typing import Optional
 
-from order_parser import CLOCK, DATE_NUM, DATE_TXT, Order
+from order_parser import CLOCK, DATE_NUM, DATE_TXT, ROSTOV_RE, Order
 from settings import Settings
 
 MONTH_NUM = {m: i + 1 for i, m in enumerate(
@@ -18,8 +18,17 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+ROSTOV_N = "ростов на дону"
+ROSTOV_TEXT = r"(?<!\w)ростов(?:а|е|у|ом)?(?!\w)(?!\s+великий)"
+
+
+def _wanted(wanted: list[str]) -> list[str]:
+    """Любой вариант Ростова в настройках = Ростов-на-Дону (а не «Ростовская область»)."""
+    return [ROSTOV_N if ROSTOV_RE.match(norm(w)) else norm(w) for w in wanted if norm(w)]
+
+
 def city_match(candidates: list[str], wanted: list[str]) -> bool:
-    ws = [norm(w) for w in wanted if norm(w)]
+    ws = _wanted(wanted)
     if not ws:
         return True
     for raw in candidates:
@@ -46,13 +55,13 @@ DEST_PREPS = {"в", "во", "до", "на", "к"}
 
 def text_has_city(text: str, wanted: list[str], role: Optional[str] = None) -> bool:
     """Город есть в тексте. role="from": не считаем упоминания после «в/до/на»; role="to": после «из/от/с»."""
-    ws = [norm(w) for w in wanted if norm(w)]
+    ws = _wanted(wanted)
     if not ws:
         return True
     t = norm(text)
     skip = DEST_PREPS if role == "from" else ORIGIN_PREPS if role == "to" else set()
     for w in ws:
-        for m in re.finditer(_stem_pattern(w), t):
+        for m in re.finditer(ROSTOV_TEXT if w == ROSTOV_N else _stem_pattern(w), t):
             prev = t[:m.start()].split()[-1:]
             if not prev or prev[0] not in skip:
                 return True
@@ -86,9 +95,9 @@ def pickup_datetime(o: Order, now: datetime) -> Optional[datetime]:
     if m:
         v = float(m.group(1).replace(",", "."))
         return now + timedelta(minutes=v if m.group(2).lower().startswith("мин") else v * 60)
-    m0 = re.search(r"через\s+(пару\s+час\w*|полчаса|час(?!\w))", t, re.I)
+    m0 = re.search(r"(?:через\s+(пару\s+час\w*|полчаса|час(?!\w))|в\s+(течение\s+часа))", t, re.I)
     if m0:
-        w = m0.group(1).lower()
+        w = (m0.group(1) or m0.group(2)).lower()
         return now + timedelta(hours=2 if w.startswith("пару") else 0.5 if w.startswith("полчаса") else 1)
     m = re.search(r"\+\s*(\d+(?:[.,]\d+)?)", t)
     if m and "час" in t:
