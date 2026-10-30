@@ -40,12 +40,23 @@ def _stem_pattern(w: str) -> str:
     return r"(?<!\w)" + re.escape(w[:-1])      # основа слова: Москва, Москву, Москвы
 
 
-def text_has_city(text: str, wanted: list[str]) -> bool:
+ORIGIN_PREPS = {"из", "от", "со", "с"}
+DEST_PREPS = {"в", "во", "до", "на", "к"}
+
+
+def text_has_city(text: str, wanted: list[str], role: Optional[str] = None) -> bool:
+    """Город есть в тексте. role="from": не считаем упоминания после «в/до/на»; role="to": после «из/от/с»."""
     ws = [norm(w) for w in wanted if norm(w)]
     if not ws:
         return True
     t = norm(text)
-    return any(re.search(_stem_pattern(w), t) for w in ws)
+    skip = DEST_PREPS if role == "from" else ORIGIN_PREPS if role == "to" else set()
+    for w in ws:
+        for m in re.finditer(_stem_pattern(w), t):
+            prev = t[:m.start()].split()[-1:]
+            if not prev or prev[0] not in skip:
+                return True
+    return False
 
 
 def merge_cities(current: list[str], text: str) -> list[str]:
@@ -127,13 +138,23 @@ def passes(o: Order, s: Settings, now: datetime) -> tuple[bool, str]:
     # Города: из А куда угодно, откуда угодно в Б, и из А в Б (достаточно любого совпадения)
     if s.from_cities or s.to_cities:
         directional = o.route_confidence in ("high", "medium")
+        guessed = o.route_confidence == "low" and bool(o.from_city and o.to_city)
+        from_c, to_c = [o.from_city, o.from_raw], [o.to_city, o.to_raw]
         from_ok = to_ok = False
         if s.from_cities:
-            from_ok = (city_match([o.from_city, o.from_raw], s.from_cities) if directional
-                       else text_has_city(o.raw_text, s.from_cities))
+            if directional:
+                from_ok = city_match(from_c, s.from_cities)
+            else:   # неуверенный маршрут: сначала догадка, затем поиск по тексту без учёта роли «куда»
+                from_ok = (guessed and city_match(from_c, s.from_cities)) or (
+                    text_has_city(o.raw_text, s.from_cities, "from")
+                    and not (guessed and city_match(to_c, s.from_cities)))
         if s.to_cities:
-            to_ok = (city_match([o.to_city, o.to_raw], s.to_cities) if directional
-                     else text_has_city(o.raw_text, s.to_cities))
+            if directional:
+                to_ok = city_match(to_c, s.to_cities)
+            else:
+                to_ok = (guessed and city_match(to_c, s.to_cities)) or (
+                    text_has_city(o.raw_text, s.to_cities, "to")
+                    and not (guessed and city_match(from_c, s.to_cities)))
         if not (from_ok or to_ok):
             return False, "города не совпали"
     if s.time_mode == "urgent":
