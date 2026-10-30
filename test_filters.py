@@ -35,6 +35,7 @@ bad += check("в 3 ч: 23 октября (прошло)", S["city2city"], w, Fal
 bad += check("нет цены при мин. сумме", parse_order("Ростов - Москва сегодня 17:00"), Settings(min_price=5000), False)
 bad += check("нет цены, unknown_ok", parse_order("Ростов - Москва сегодня 17:00"), Settings(min_price=5000, unknown_ok=True), True)
 bad += check("пауза", S["city2city"], Settings(enabled=False), False)
+bad += check("в 3 ч: через пару часов", parse_order("Через пару часов\nРостов - Миллерово\n8000"), w, True)
 bad += check("все фильтры сразу", S["Марковка"], Settings(min_price=3000, time_mode="urgent", to_cities=["Россошь"]), True)
 
 # --- города независимо: направление там, где маршрут понятен, иначе поиск по тексту

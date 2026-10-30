@@ -54,7 +54,10 @@ def hint_norm(h: str) -> str:
     key = norm(h)
     if key in HINT_MAP:
         return HINT_MAP[key]
-    h = re.sub(r"(?<!\w)обл\.?(?!\w)", "область", h.strip(), flags=re.I)
+    h = h.strip()
+    for k, v in HINT_MAP.items():           # «антрацитовский район, ЛНР» -> «…, Луганская область»
+        h = re.sub(rf"(?<!\w){k}(?!\w)", v, h, flags=re.I)
+    h = re.sub(r"(?<!\w)обл\.?(?!\w)", "область", h, flags=re.I)
     h = re.sub(r"(?<!\w)р-?(?:он|н)(?!\w)", "район", h, flags=re.I)
     h = re.sub(r"(?<!\w)респ\.?(?!\w)", "республика", h, flags=re.I)
     return h[:1].upper() + h[1:]

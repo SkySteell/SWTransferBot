@@ -14,7 +14,7 @@ from typing import Optional
 MONTHS = r"(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)"
 
 ARROW_RE = re.compile(
-    r"\s*(?:\u27a1\ufe0f?|\u2b95|\u279c|\u2794|\u21d2|\u2192|=>|-{1,2}>|[—–]>)\s*"
+    r"\s*(?:\u27a1\ufe0f?|\u2b95|\u279c|\u2794|\u21d2|\u2192|=>|-{1,2}>|[—–]>|>{2,3})\s*"
 )
 EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF"
@@ -25,24 +25,37 @@ CLOCK = r"(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)"
 DATE_NUM = r"(?<!\d)\d{1,2}\.(?:0?[1-9]|1[0-2])(?:\.\d{2,4})?\.?(?!\d)"
 DATE_TXT = rf"(?<!\d)\d{{1,2}}\s+{MONTHS}(?:\s+\d{{4}})?"
 REL1 = r"через\s+\d+(?:[.,]\d+)?\s*(?:мин\w*|час\w*)"
+REL0 = r"через\s+(?:пару\s+час\w*|полчаса|час(?!\w))"
 REL2 = r"\+\s*\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*час\w*"
-PASS = r"(?:\d+|один|одна|два|две|три|четыре|пять)\s*(?:чел\w*|пасс\w*|взросл\w*)\.?"
-LUGG = r"(?:\d+|один|одна|два|две|три|четыре|пять)\s*(?:сумк\w*|багаж\w*|чемодан\w*|мест\w*)"
-KM = r"\d+\s*км"
+PASS = r"(?:\d+|один|одна|два|две|три|четыре|пять)[ \t]*(?:чел\w*|пасс\w*|взр\w*)\.?"
+LUGG = r"(?:\d+|один|одна|два|две|три|четыре|пять)[ \t]*(?:сумк\w*|багаж\w*|чемодан\w*|мест\w*)"
+KM = r"\d+[ \t]*км"
 PERCENT = r"/?\s*\d{1,2}\s*%"
 CLOCK_PREP = r"(?:(?<!\w)(?:в|к|около|с|до)\s+)?" + CLOCK
 EQUATION = r"\d+\s*[*хx×]\s*\d+\s*=\s*[\d ]+"                       # 155*27=4 185
-COMM_WORD = r"(?:комса|комис\w*)\s*[:\-]?\s*\d{2,5}"                  # Комса 2000
+COMM_WORD = r"(?<!\w)(?:комса|комис\w*|ком)(?!\w)\s*[:\-]?\s*\d{1,5}\s*%?"   # Комса 2000, комиссия 10%, ком 500
 COMMISSION = r"(?<=\d{3})\s*/\s*\d{1,4}(?:\s*%)?"            # 3000/500, 5800/10, 5.500/10%
 THOUSANDS = r"(?<![\d.,])(\d{1,3}(?:[.,]\d)?)\s*(?:тыс|тр|т)(?!\w)\.?"   # 8т, 8 тыс
 PRICE_NUM = r"(?<![\d.,])(\d{1,3}(?:[ .]\d{3})+|\d{3,6})(?!\d)"
 PHONE = r"(?<!\d)\+?\d[\d\- ()]{9,}\d(?!\d)"
 
-EXTRACT_TOKENS = [EQUATION, COMM_WORD, REL2, REL1, DATE_TXT, DATE_NUM, CLOCK_PREP, KM, PASS, LUGG, COMMISSION, PERCENT, THOUSANDS, PRICE_NUM]
+EXTRACT_TOKENS = [EQUATION, COMM_WORD, REL2, REL1, REL0, DATE_TXT, DATE_NUM, CLOCK_PREP, KM, PASS, LUGG, COMMISSION, PERCENT, THOUSANDS, PRICE_NUM]
 
 NOISE = [
     r"пишем\s+(?:я\s+и\s+)?время\s+подачи",
     r"пишем\s+я(?!\w)",
+    r"пиш(?:ите|и)\s+(?:я\s+и\s+)?время\s+подачи",
+    r"(?<!\w)(?:в\s+)?(?:личк\w*|лс)(?!\w)",
+    r"через\s+(?:банкомат|сбп|карт\w*|терминал)",
+    r"ждет\s+\d+(?:\s*/\s*\d+)?\s*мин\w*",
+    r"(?<!\w)по\s+\d+(?:[.,]\d+)?(?!\w)",
+    r"(?<!\w)ближайш\w+\s+(?:авто|машин\w*)(?!\w)",
+    r"(?:нужен\s+)?(?<!\w)бустер\w*",
+    r"(?<!\w)багаж\w*",
+    r"(?<!\w)выезд(?!\w)",
+    r"\+\s*\d+\s*мин\w*",
+    r"(?<![\w-])т(?![\w-])",
+    r"\(?\s*платк\w*\s+в\s+(?:сумме|цене)\s*\)?",
     r"ждут\s+с\s+\w+",
     r"желательно\s+\w+",
     r"взять\s+заказ",
@@ -85,7 +98,7 @@ STOP_RE = re.compile(r"план\s+работы|по\s+заказу\s+пока\s+
 
 LABELS = {
     "откуда": "from", "а": "from", "куда": "to", "б": "to",
-    "сумма водителю": "price", "стоимость": "price", "цена": "price",
+    "сумма водителю": "price", "стоимость": "price", "стоимость поездки": "price", "цена поездки": "price", "цена": "price",
     "оплата": "price", "сумма": "price",
     "дата/время поездки": "time", "когда": "time", "дата": "time", "время": "time",
     "класс авто": "class", "класс": "class", "тариф": "tariff",
@@ -103,6 +116,9 @@ PREP_ONLY = {"до", "в", "из", "от", "на", "во", "с", "со", "→"}
 ADDR_CUT_RE = re.compile(
     r"\s+(?:ул\.?|улица|пр-т|проспект|пер\.?|переулок|шоссе|наб\.?|набережная|бульвар|б-р|мкр\.?|микрорайон|корп\.?|кв\.?|дом)(?!\w)"
     r"|\s+д\.?\s*\d", re.I)
+ADDRISH_RE = re.compile(
+    r"(?<!\w)(?:аэропорт\w*|вокзал\w*|ул\.?|улица|бульвар|проспект|пр-т|переулок|шоссе|набережная|мкр\.?|микрорайон)(?!\w)",
+    re.I)
 REGION_RE = re.compile(r"обл|респ|край|район|р-н|р-он|округ", re.I)
 PLACE_PREFIX_RE = re.compile(
     r"^(?:кпп|пгт|гор|г|город|с|п|пос|посёлок|поселок|ст-ца|станица|х|хутор|д|дер|деревня)\.?[\s,]+",
@@ -120,7 +136,7 @@ class Order:
     to_hint: Optional[str]
     price: Optional[int]
     price_kind: Optional[str]      # "на руки" | "общее" | "водителю" | None
-    tolls: Optional[str]           # "extra" (+платка) | "mentioned" | None
+    tolls: Optional[str]           # "extra" (+платка) | "included" (в цене) | "client" | "mentioned" | None
     percent: Optional[int]
     urgent: bool
     time_text: Optional[str]
@@ -131,6 +147,9 @@ class Order:
     route_confidence: str          # "high" | "medium" | "low" | "none"
     raw_text: str
     commission_rub: Optional[int] = None   # «3000/500»: число после слэша, если это рубли
+    dispatcher: Optional[str] = None       # диспетчер, указанный в тексте заказа
+    dispatcher_username: Optional[str] = None
+    address_flag: bool = False             # в маршруте адрес (улица, дом, микрорайон) вместо города
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -151,6 +170,7 @@ def normalize(text: str) -> list[str]:
     t = ARROW_RE.sub(" → ", t)
     t = EMOJI_RE.sub(" ", t)
     t = re.sub(r"(?<!\d)(\d{1,2});([0-5]\d)(?!\d)", r"\1:\2", t)
+    t = re.sub(r"(?<![\d:.,])(\d{1,2})[ \t]+:[ \t]*([0-5]\d)(?!\d)", r"\1:\2", t)
     t = re.sub(r"(?<![\d,.])(\d{1,2}),([0-5]\d)(?!\d)", r"\1:\2", t)
     t = re.sub(r"(?<![\d:.])(\d{1,2})\s*(утра|ночи|вечера|дня)(?!\w)", _ampm, t, flags=re.I)
     lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in t.splitlines()]
@@ -183,9 +203,13 @@ def extract_price(text: str) -> tuple[Optional[int], Optional[str]]:
             cands.append((v, t[m.end():m.end() + 14]))
     if not cands:
         th = re.search(THOUSANDS, t, re.I)
-        if not th:
-            return None, None
-        cands = [(int(round(float(th.group(1).replace(",", ".")) * 1000)), "")]
+        if th:
+            cands = [(int(round(float(th.group(1).replace(",", ".")) * 1000)), "")]
+        else:
+            sh = re.search(r"(?<![\d.,])(\d{1,2})[ \t]*(?:₽|р(?!\w)|руб)", t, re.I)   # «8₽» = 8 000
+            if not sh or int(sh.group(1)) < 3:
+                return None, None
+            cands = [(int(sh.group(1)) * 1000, "")]
     money = re.compile(r"^\s*(?:₽|р(?!\w)|руб|т\.?\s?р|на\s+руки|общ|\+\s*плат)", re.I)
     adj = [c for c in cands if money.match(c[1])]
     price = (adj[0] if adj else cands[-1])[0]
@@ -203,7 +227,8 @@ def extract_commission(text: str) -> tuple[Optional[int], Optional[int]]:
     """(проценты, рубли) из хвоста вида «3000/500», «5800/10», «5.500/10%»."""
     cw = re.search(COMM_WORD, text, re.I)
     if cw:
-        return None, int(re.search(r"\d+", cw.group(0)).group(0))
+        v = int(re.search(r"\d+", cw.group(0)).group(0))
+        return (v, None) if "%" in cw.group(0) else (None, v)
     m = re.search(r"(?<=\d{3})\s*/\s*(\d{1,4})(\s*%)?", text)
     if not m:
         return None, None
@@ -215,7 +240,33 @@ def extract_commission(text: str) -> tuple[Optional[int], Optional[int]]:
     return None, v
 
 
+def extract_dispatcher(lines: list[str]) -> tuple[Optional[str], Optional[str]]:
+    """«Диспетчер: @user» или «Диспетчер:» и @user на следующей строке -> (имя, username)."""
+    for i, ln in enumerate(lines):
+        m = re.match(r"^диспетчер\s*[:\-–—]\s*(.*)$", ln, re.I)
+        if not m:
+            continue
+        val = m.group(1).strip()
+        if not val and i + 1 < len(lines):
+            nxt = lines[i + 1].strip()
+            if ":" not in nxt and (nxt.startswith("@") or re.fullmatch(r"[\w .-]{2,40}", nxt)):
+                val = nxt
+        if not val or val.endswith(":"):
+            return None, None
+        um = re.search(r"@([A-Za-z][A-Za-z0-9_]{3,31})", val)
+        username = um.group(1) if um else None
+        name = re.sub(r"@[A-Za-z0-9_]+", "", val).strip(" ,.-–—:")
+        if name:
+            return name, username
+        if username:
+            return f"@{username}", username
+        return None, None
+    return None, None
+
+
 def extract_tolls(text: str) -> Optional[str]:
+    if re.search(r"платк\w*\s+в\s+(?:сумме|цене)|платн\w+\s+дорог\w*\s+в\s+(?:сумме|цене)", text, re.I):
+        return "included"
     if re.search(r"платк\w*\s*[:\-]?\s*клиент|платн\w+\s+дорог\w+\s+(?:оплачивает\s+)?(?:строго\s+)?клиент|"
                  r"дорог\w+\s+оплачивает\s+(?:строго\s+)?клиент", text, re.I):
         return "client"
@@ -240,9 +291,9 @@ def extract_time(text: str) -> tuple[bool, Optional[str]]:
     clock = re.search(CLOCK, text)
     if clock:
         parts.append(clock.group(0))
-    rel = re.search(REL1, text, re.I) or re.search(REL2, text, re.I)
+    rel = re.search(REL1, text, re.I) or re.search(REL2, text, re.I) or re.search(REL0, text, re.I)
     if rel:
-        parts.append(re.sub(r"\s+", " ", rel.group(0)))
+        parts.append(re.sub(r"\s+", " ", rel.group(0)).lower())
     return urgent, (" ".join(parts) if parts else None)
 
 
@@ -274,8 +325,8 @@ def clean_line(line: str, strip_preps: bool = True) -> str:
     st = line.strip()
     if re.match(r"^\d+\.\s", st) or re.match(r"^такси\s*[\"«“]", st, re.I):
         return ""               # «1. Источник», подпись «Такси "КРУИЗ"»
-    if FOOTER_RE.search(st):
-        return ""               # служебные строки ботов-агрегаторов
+    if FOOTER_RE.search(st) or re.match(r"^диспетчер", st, re.I):
+        return ""               # служебные строки ботов-агрегаторов и «Диспетчер: …»
     if st.startswith("(") and st.rstrip(" .").endswith(")"):
         return ""               # строка целиком в скобках: «(место по согласованию)»
     t = _remove(line, EXTRACT_TOKENS)
@@ -307,6 +358,10 @@ def parse_place(raw: str) -> tuple[str, Optional[str]]:
             hint = ", ".join(reversed(regions))
             s = rest[0]
     s = PLACE_PREFIX_RE.sub("", s)
+    rm = re.search(r"\s+(ЛНР|ДНР|ХНР|ЗНР)(?!\w)", s, re.I)
+    if rm:                                  # «Брянка ЛНР», «Ивановка ЛНР антрацитовский район»
+        s = (s[:rm.start()] + s[rm.end():]).strip()
+        hint = (hint + ", " if hint else "") + rm.group(1).upper()
     m = re.search(r"\(([^)]*)\)", s)
     if m:
         hint = m.group(1).strip() or hint
@@ -326,7 +381,14 @@ def parse_place(raw: str) -> tuple[str, Optional[str]]:
     city = parts[0].strip(" ,.")
     cut = ADDR_CUT_RE.search(city)
     if cut:
+        tail = city[cut.end():]
         city = city[:cut.start()]
+        if re.match(r"\s*\d", tail) and " " in city.strip():
+            city = city.rsplit(" ", 1)[0]   # «Веселое Стратонавтов улица 24» -> название улицы перед словом «улица»
+    pm = re.match(r"^(.+?)\s+(под\s+[А-ЯЁA-Z]\w+)$", city.strip())
+    if pm:                                  # «Веселое под Донецком»
+        city = pm.group(1)
+        hint = (hint + ", " if hint else "") + pm.group(2)
     city = re.sub(r"^(?:аэропорт|аэро|вокзал|ж/?д\s+вокзал|жд)\s+", "", city, flags=re.I)
     city = STATION_RE.sub("", city).strip(" ,.")
     city = PLACE_PREFIX_RE.sub("", city).strip(" ,.") or city
@@ -360,7 +422,7 @@ def find_route(lines: list[str]) -> tuple[Optional[str], Optional[str], str]:
             if left and right:
                 return left, right, "high"
     for c in cl:
-        parts = re.split(r"\s+[-–—]\s+|\s*[–—]\s*", c, maxsplit=1)
+        parts = re.split(r"\s+[-–—]\s+|\s+-(?=[^\s\d])|(?<=[^\s\d])-\s+|\s*[–—]\s*", c, maxsplit=1)
         if len(parts) == 2 and all(p.strip() for p in parts):
             return strip_prep(parts[0]), strip_prep(parts[1]), "high"
     if len(cl) == 1:                    # «Донецк Ростов», «Донецк-Ростов»: два названия без разделителя
@@ -371,6 +433,9 @@ def find_route(lines: list[str]) -> tuple[Optional[str], Optional[str], str]:
         hy = re.fullmatch(r"([А-ЯЁA-Z][\w]+)-([А-ЯЁA-Z][\w]+)", base)
         if hy and norm_hyphen(base) not in HYPHEN_NAMES:
             return hy.group(1), hy.group(2), "low"
+    if len(cl) == 4 and ADDRISH_RE.search(cl[1]) and ADDRISH_RE.search(cl[3]) \
+            and not ADDRISH_RE.search(cl[0]) and not ADDRISH_RE.search(cl[2]):
+        return f"{cl[0]}, {cl[1]}", f"{cl[2]}, {cl[3]}", "medium"   # город и адрес на отдельных строках
     if len(cl) >= 2:
         return cl[0], cl[1], ("medium" if len(cl) == 2 else "low")
     return None, None, "low"
@@ -437,16 +502,22 @@ def parse_order(text: str, allow_unrouted: bool = False) -> Optional[Order]:
     if not comment:
         extras = []
         for pat in (r"\d+\s*адрес\w*",
-                    r"(?:\d+\s*)?(?:детей|дети|ребёнок|ребенок)(?:\s+\d+(?:\s*и\s*\d+)?\s*(?:лет|года|год))?",
+                    r"(?:\d+[ \t]*)?(?:детей|дети|ребёнок|ребенок)(?:[ \t]*:[ \t]*\d+)?(?:[ \t]*\(?[ \t]*\d+(?:[ \t]*и[ \t]*\d+)?[ \t]*(?:лет|года|год)[ \t]*\)?)?",
+                    r"(?:нужен\s+)?бустер\w*",
                     r"\d+\s*дам\w*\s*\+\s*бейб\w*",
                     r"детск\w+\s+кресл\w+(?:\s+обязательн\w+)?"):
             am = re.search(pat, full, re.I)
             if am:
                 extras.append(am.group(0).strip())
         comment = "; ".join(extras) if extras else None
+    if comment:
+        comment = re.sub(r"\s*\(\s*", " (", comment)
+        comment = re.sub(r"\s*\)", ")", comment)
     if comment and len(re.findall(r"[A-Za-zА-Яа-яЁё]", re.sub(PASS, "", comment, flags=re.I))) < 3:
         comment = None
 
+    disp, disp_user = extract_dispatcher(lines)
+    addr = bool(from_raw and (ADDR_CUT_RE.search(from_raw.split(",")[0]) or ADDR_CUT_RE.search(to_raw.split(",")[0])))
     from_city, from_hint = parse_place(from_raw)
     to_city, to_hint = parse_place(to_raw)
     return Order(
@@ -454,6 +525,7 @@ def parse_order(text: str, allow_unrouted: bool = False) -> Optional[Order]:
         to_raw=to_raw, to_city=to_city, to_hint=to_hint,
         price=price, price_kind=kind, tolls=extract_tolls(full),
         percent=pct, commission_rub=fee_rub,
+        dispatcher=disp, dispatcher_username=disp_user, address_flag=addr,
         urgent=urgent, time_text=time_text, passengers=passengers,
         car_class=extract_class(labeled.get("class", "") + " " + full),
         distance_km=int(km.group(1)) if km else None,

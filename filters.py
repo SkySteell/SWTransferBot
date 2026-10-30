@@ -75,6 +75,10 @@ def pickup_datetime(o: Order, now: datetime) -> Optional[datetime]:
     if m:
         v = float(m.group(1).replace(",", "."))
         return now + timedelta(minutes=v if m.group(2).lower().startswith("мин") else v * 60)
+    m0 = re.search(r"через\s+(пару\s+час\w*|полчаса|час(?!\w))", t, re.I)
+    if m0:
+        w = m0.group(1).lower()
+        return now + timedelta(hours=2 if w.startswith("пару") else 0.5 if w.startswith("полчаса") else 1)
     m = re.search(r"\+\s*(\d+(?:[.,]\d+)?)", t)
     if m and "час" in t:
         return now + timedelta(hours=float(m.group(1).replace(",", ".")))

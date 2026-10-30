@@ -54,7 +54,10 @@ def format_card(o: Order, dispatcher: str, group: str,
     head = "🆕 ЗАКАЗ"
     if o.urgent:
         head += " · ⚡️ СРОЧНО"
-    head += f" · {o.time_text}" if o.time_text else " · -"
+    if o.time_text:
+        head += f" · {o.time_text}"
+    elif not o.urgent:
+        head += " · -"
     lines = [head]
 
     if o.route_confidence == "none":
@@ -75,6 +78,8 @@ def format_card(o: Order, dispatcher: str, group: str,
 
     if o.tolls == "extra":
         lines.append("🛣 + платные дороги сверху")
+    elif o.tolls == "included":
+        lines.append("🛣 платные дороги в цене")
     elif o.tolls == "client":
         lines.append("🛣 платные дороги оплачивает клиент")
     elif o.tolls == "mentioned":
