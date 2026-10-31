@@ -25,10 +25,11 @@ from telethon.tl.types import Channel, User
 
 import groups as groups_store
 import settings as settings_store
+from accept import dm_text, dm_url, find_take_button, is_dm_only, wants_dm
 from calc import Geo, calculate
 from cards import format_card
 from filters import merge_cities, passes
-from order_parser import Order, parse_order
+from order_parser import Order, parse_order, split_multi
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("orderbot")
@@ -53,6 +54,7 @@ groups = groups_store.load()          # все группы и каналы ак
 group_stats: Counter = Counter()  # сколько заказов распознано по группам с запуска
 seen: "dict[str, Seen]" = {}   # заказ -> отправленная карточка и группы, где он замечен
 raw_texts: "OrderedDict[int, str]" = OrderedDict()
+cards: "OrderedDict[int, Seen]" = OrderedDict()   # id карточки у бота -> заказ (для кнопки «Принять»)
 stats: Counter = Counter()
 pending: Optional[str] = None   # какую настройку владелец сейчас вводит
 
@@ -77,6 +79,12 @@ class Seen:
     rows: list = field(default_factory=list)
     chats: dict = field(default_factory=dict)      # id группы -> название (первая группа первой)
     sent: object = None
+    chat_id: int = 0                               # группа-источник и сообщение заказа (для «Принять»)
+    msg_id: int = 0
+    username: Optional[str] = None                 # диспетчер для личного сообщения
+    text: str = ""
+    dm_only: bool = False                          # группа из исключений: только писать диспетчеру
+    status: Optional[str] = None                   # «Принято: …» после нажатия «Принять»
     res: object = None                             # результат расчёта, пока None карточка показывает «Считаю…»
     calc_error: Optional[str] = None
 
@@ -89,8 +97,9 @@ def find_seen(o: Order) -> Optional[Seen]:
 
 
 def render_card(e: Seen) -> str:
-    return format_card(e.order, e.dispatcher, e.group, e.res,
+    text = format_card(e.order, e.dispatcher, e.group, e.res,
                        extra_groups=max(0, len(e.chats) - 1), calc_error=e.calc_error)
+    return text + (f"\n\n✅ {e.status}" if e.status else "")
 
 
 async def refresh_card(e: Seen) -> None:
@@ -166,9 +175,14 @@ async def on_message(event: events.NewMessage.Event) -> None:
             pass
     if cid in cfg.muted_chats:
         return
+    for part in split_multi(event.raw_text):   # в одном сообщении может быть список заказов
+        await process_order(event, cid, part)
+
+
+async def process_order(event, cid: int, text: str) -> None:
     entry = None
     try:
-        order = parse_order(event.raw_text, allow_unrouted=bool(cfg.from_cities or cfg.to_cities))
+        order = parse_order(text, allow_unrouted=bool(cfg.from_cities or cfg.to_cities))
         if order is None:
             return
         stats["заказов распознано"] += 1
@@ -186,7 +200,8 @@ async def on_message(event: events.NewMessage.Event) -> None:
                 entry.chats[cid] = group
                 await refresh_card(entry)
             return
-        entry = Seen(t=time.time(), order=order, chats={cid: group})
+        entry = Seen(t=time.time(), order=order, chats={cid: group}, chat_id=cid, msg_id=event.message.id, text=text,
+                     dm_only=is_dm_only(cid, getattr(chat, "username", None), cfg.dm_only_chats))
         seen[dedupe_key(order)] = entry
 
         sender = await event.get_sender()
@@ -194,7 +209,7 @@ async def on_message(event: events.NewMessage.Event) -> None:
         # настоящий диспетчер берётся из текста заказа, а не отправитель-бот (решение 30.10)
         dispatcher = order.dispatcher or "-"
         username = order.dispatcher_username or (None if getattr(sender, "bot", False) else sender_username)
-        entry.dispatcher, entry.group = dispatcher, group
+        entry.dispatcher, entry.group, entry.username = dispatcher, group, username
 
         rows = []
         first = []
@@ -205,6 +220,7 @@ async def on_message(event: events.NewMessage.Event) -> None:
             first.append(Button.url("💬 Диспетчер", f"https://t.me/{username}"))
         if first:
             rows.append(first)
+        rows.append([Button.inline("✅ Принять", b"acc")])
         rows.append([Button.inline("🙈 Скрыть", b"hide"), Button.inline("⚠️ Ошибка", b"bad")])
 
         entry.rows = rows
@@ -212,8 +228,11 @@ async def on_message(event: events.NewMessage.Event) -> None:
             OWNER_ID, render_card(entry), buttons=rows, link_preview=False,
         )
         entry.sent = sent
+        cards[sent.id] = entry
+        while len(cards) > RAW_KEEP:
+            cards.popitem(last=False)
         stats["отправлено"] += 1
-        raw_texts[sent.id] = event.raw_text
+        raw_texts[sent.id] = text
         while len(raw_texts) > RAW_KEEP:
             raw_texts.popitem(last=False)
         task = asyncio.create_task(attach_calc(entry))
@@ -435,12 +454,62 @@ async def on_owner_message(event: events.NewMessage.Event) -> None:
         await event.respond("✅ Сохранено\n\n" + settings_text(), buttons=settings_buttons())
 
 
+async def accept_order(event) -> None:
+    """«Принять»: кнопка под заказом -> чат с диспетчером -> ответ «Я» (решение 31.10)."""
+    e = cards.get(event.message_id)
+    if e is None:
+        await event.answer("Карточка устарела, откройте источник", alert=True)
+        return
+    if e.status:
+        await event.answer(e.status)
+        return
+    try:
+        src, btn = None, None
+        if not e.dm_only:
+            try:
+                src = await user.get_messages(e.chat_id, ids=e.msg_id)
+                btn = find_take_button(src.buttons if src else None)
+            except Exception:
+                log.exception("Не удалось прочитать сообщение заказа")
+        if btn and not btn[2].url:                      # 1) кнопка «Взять заказ» под сообщением
+            await src.click(btn[0], btn[1])
+            e.status = f"Принято: нажал «{btn[2].text}»"
+            stats["принято: кнопка"] += 1
+        elif btn or e.dm_only or wants_dm(e.text):      # 2) личное сообщение диспетчеру
+            if btn:                                      # кнопка-ссылка: открыть как есть
+                await bot.send_message(OWNER_ID, "Откройте ссылку, чтобы взять заказ:",
+                                       buttons=[[Button.url(btn[2].text, btn[2].url)]], link_preview=False)
+                await event.answer()
+                return
+            if not e.username:
+                await event.answer("Контакта диспетчера нет в заказе, откройте источник", alert=True)
+                return
+            await bot.send_message(
+                OWNER_ID, "✍️ Откроется чат с диспетчером, текст уже в поле ввода:\n" + dm_text(e.order),
+                buttons=[[Button.url("✍️ Написать диспетчеру", dm_url(e.username, e.order))]], link_preview=False)
+            stats["принято: личное"] += 1
+            await event.answer()
+            return
+        else:                                            # 3) ответ «Я» на сообщение заказа
+            await user.send_message(e.chat_id, "Я", reply_to=e.msg_id)
+            e.status = "Принято: ответил «Я»"
+            stats["принято: «Я»"] += 1
+        await event.answer(e.status)
+        await refresh_card(e)
+    except Exception:
+        log.exception("Ошибка приёма заказа")
+        await event.answer("Не получилось принять, откройте источник", alert=True)
+
+
 @bot.on(events.CallbackQuery)
 async def on_callback(event: events.CallbackQuery.Event) -> None:
     global pending
     if event.sender_id != OWNER_ID:
         return
     data = event.data
+    if data == b"acc":
+        await accept_order(event)
+        return
     if data == b"hide":
         await event.delete()
         return

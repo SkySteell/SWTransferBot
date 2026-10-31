@@ -38,7 +38,8 @@ def city_match(candidates: list[str], wanted: list[str]) -> bool:
         for w in ws:
             if n == w or n.startswith(w + " "):
                 return True
-            if " " not in w and len(w) >= 5 and n.split()[0].startswith(w):
+            stem = w[:-1] if w[-1] in "аяьиеуо" else w      # Москва -> москв (Москвы, Москве)
+            if " " not in w and len(w) >= 5 and n.split()[0].startswith(stem):
                 return True
     return False
 

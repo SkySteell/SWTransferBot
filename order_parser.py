@@ -27,7 +27,7 @@ DATE_TXT = rf"(?<!\d)\d{{1,2}}\s+{MONTHS}(?:\s+\d{{4}})?"
 REL1 = r"через\s+\d+(?:[.,]\d+)?\s*(?:мин\w*|час\w*)"
 REL0 = r"(?:через\s+(?:пару\s+час\w*|полчаса|час(?!\w))|в\s+течение\s+часа)"
 REL2 = r"\+\s*\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*час\w*"
-PASS = r"(?:\d+|один|одна|два|две|три|четыре|пять)[ \t]*(?:чел\w*|пасс\w*|взр\w*)\.?"
+PASS = r"(?:\d+|один|одна|два|две|три|четыре|пять)[ \t]*(?:чел\w*|пас{1,2}\w*|взр\w*)\.?"
 LUGG = r"(?:\d+|один|одна|два|две|три|четыре|пять)[ \t]*(?:сумк\w*|багаж\w*|чемодан\w*|мест\w*)"
 KM = r"\d+[ \t]*км"
 PERCENT = r"/?\s*\d{1,2}\s*%"
@@ -52,6 +52,21 @@ NOISE = [
     r"(?<!\w)ближайш\w+\s+(?:авто|машин\w*)(?!\w)",
     r"(?:нужен\s+)?(?<!\w)бустер\w*",
     r"(?<!\w)багаж\w*",
+    r"\(\s*кто\s+рядом\s*\)|(?<!\w)кто\s+рядом(?!\w)",
+    r"(?<!\w)(?:отвезти|отвести|довезти|доставить|вести|везти)(?!\w)",
+    r"(?<!\w)главн\w+(?=\s+(?:жд|ж/д|вокзал|автовокзал))",
+    r"±",
+    r"(?<!\w)на\s+(?:утро|вечер|день|ночь)(?!\w)",
+    r"по\s+заказам\s+писать",
+    r"(?:писать\s+)?сюда\s*👉.*",
+    r"(?<!\w)сюда\s+междугороднее\s+такси",
+    r"(?<!\w)ждут?(?!\w)",
+    r"(?<!\w)пер?едварительн\w*\s+заказ",
+    r"(?<!\w)(?:собак\w*|собачк\w*)(?!\w)",
+    r"(?<!\w)на\s+руках(?!\w)",
+    r"кто\s+точно\s+сможет",
+    r"только\s+с\s+тем\s+кем\s+работал",
+    r"информация\s+от\s*:.*",
     r"нужно\s+забрать(?:\s+и\s+(?:привести|привезти))?(?:\s+в\s+течение\s+дня)?",
     r"(?<!\w)(?:забрать|привезти|привести|маленьк\w+|коробк\w*|пакет\w*|посылк\w*|попутн\w+|набор\s+\w+)(?!\w)",
     r"(?<!\w)док(?:и|ов|ументы?|ументов)(?!\w)",
@@ -96,7 +111,7 @@ NOISE = [
     r"(?<!\w)пред(?:в\w*)?(?!\w)",
     r"с\s+адрес\w*",
     r"(?<!\w)водител\w*",
-    r"(?<!\w)(?:комфорт\s*\+|стандарт|комфорт|минивэн|минивен|эконом|бизнес|вип|vip)(?!\w)",
+    r"(?<!\w)(?:комфорт\s*\+|стандарт|комфорт|минивэн|минивен|компакт-?в[эе]н|эконом|бизнес|вип|vip)(?!\w)",
     r"(?<!\w)или\s*$",
 ]
 
@@ -111,7 +126,7 @@ LABELS = {
     "дополнительная информация": "comment", "комментарии": "comment",
     "комментарий": "comment", "номер заявки": "id",
 }
-LABEL_RE = re.compile(r"^([A-Za-zА-Яа-яЁё/ ]{1,30}?)\s*:\s*(.*)$")
+LABEL_RE = re.compile(r"^([A-Za-zА-Яа-яЁё/ ]{1,30}?)\s*[:.]\s*(.*)$")
 
 FOOTER_RE = re.compile(
     r"можно\s+работать|полная\s+информация|если\s+вы\s+не\s+можете|нажмите|подписк|администратор|"
@@ -171,14 +186,23 @@ def _ampm(m) -> str:
     return f" {h}:00 "
 
 
+def _ampm_min(m) -> str:
+    h = int(m.group(1))
+    if m.group(3).lower() in ("вечера", "дня") and h < 12:
+        h += 12
+    return f" {h}:{m.group(2)} "
+
+
 def normalize(text: str) -> list[str]:
     t = text.replace("\u00a0", " ").replace("\u202f", " ")
     t = ARROW_RE.sub(" → ", t)
     t = EMOJI_RE.sub(" ", t)
     t = re.sub(r"(?<!\d)(\d{1,2});([0-5]\d)(?!\d)", r"\1:\2", t)
     t = re.sub(r"(?<![\d:.,])(\d{1,2})[ \t]+:[ \t]*([0-5]\d)(?!\d)", r"\1:\2", t)
+    t = re.sub(r"(?<![\d:.,])((?:[01]?\d|2[0-3]))\.(00|1[3-9]|[2-5]\d)(?![\d.,:])", r"\1:\2", t)   # «16.00», «17.30»
     t = re.sub(r"(?<![\d.,])(\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\.?)[ \t]+(\d{1,2})\.([0-5]\d)(?!\d)", r"\1 \2:\3", t)   # «30.10 19.00»
     t = re.sub(r"(?<![\d,.])(\d{1,2}),([0-5]\d)(?!\d)", r"\1:\2", t)
+    t = re.sub(r"(?<![\d:.])(\d{1,2}):([0-5]\d)\s*(утра|ночи|вечера|дня)(?!\w)", _ampm_min, t, flags=re.I)   # «5:30 утра»
     t = re.sub(r"(?<![\d:.])(\d{1,2})\s*(утра|ночи|вечера|дня)(?!\w)", _ampm, t, flags=re.I)
     lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in t.splitlines()]
     merged: list[str] = []
@@ -250,7 +274,7 @@ def extract_commission(text: str) -> tuple[Optional[int], Optional[int]]:
 def extract_dispatcher(lines: list[str]) -> tuple[Optional[str], Optional[str]]:
     """«Диспетчер: @user» или «Диспетчер:» и @user на следующей строке -> (имя, username)."""
     for i, ln in enumerate(lines):
-        m = re.match(r"^диспетчер\s*[:\-–—]\s*(.*)$", ln, re.I)
+        m = re.match(r"^(?:диспетчер|информация\s+от)\s*[:\-–—]\s*(.*)$", ln, re.I)
         if not m:
             continue
         val = m.group(1).strip()
@@ -306,7 +330,7 @@ def extract_time(text: str) -> tuple[bool, Optional[str]]:
 
 def extract_class(text: str) -> Optional[str]:
     t = text.lower()
-    if re.search(r"минивэн|минивен", t):
+    if re.search(r"минивэн|минивен|компакт-?в[эе]н", t):
         return "Минивэн"
     if re.search(r"комфорт\s*(?:\+|плюс)", t):
         return "Комфорт+"
@@ -332,7 +356,7 @@ def clean_line(line: str, strip_preps: bool = True) -> str:
     st = line.strip()
     if re.match(r"^\d+\.\s", st) or re.match(r"^такси\s*[\"«“]", st, re.I):
         return ""               # «1. Источник», подпись «Такси "КРУИЗ"»
-    if FOOTER_RE.search(st) or re.match(r"^диспетчер", st, re.I):
+    if FOOTER_RE.search(st) or re.match(r"^(?:диспетчер|пользователь\s+@)", st, re.I):
         return ""               # служебные строки ботов-агрегаторов и «Диспетчер: …»
     if st.startswith("(") and st.rstrip(" .").endswith(")"):
         return ""               # строка целиком в скобках: «(место по согласованию)»
@@ -434,12 +458,46 @@ def norm_hyphen(s: str) -> str:
     return re.sub(r"[-–—\s]+", " ", s.lower().replace("ё", "е")).strip()
 
 
+COMPOUNDS = [(r"минеральн\w*", r"вод\w*"), (r"нижн\w+", r"новгород\w*"), (r"велик\w+", r"новгород\w*"),
+             (r"набережн\w+", r"челн\w*"), (r"стар\w+|нов\w+", r"оскол\w*"), (r"красн\w+", r"сулин\w*")]
+
+
+def split_two_places(base: str) -> Optional[tuple[str, str]]:
+    """«Донецк Ростов», «Аргун (Чеченская Республика) Махачкала», «Минеральные Воды Волгоград»."""
+    toks: list[str] = []
+    for m in re.finditer(r"\([^)]*\)|\S+", base):
+        t = m.group(0)
+        if t.startswith("(") and toks:
+            toks[-1] += " " + t
+        else:
+            toks.append(t)
+    out: list[str] = []
+    for t in toks:
+        if out and t.lower() in ("жд", "ж/д", "аэропорт", "аэро", "вокзал", "автовокзал") and "(" not in out[-1]:
+            out[-1] += " " + t              # «Ростов ЖД Таганрог», «Краснодар аэропорт Ростов-на-Дону»
+        elif out and any(re.fullmatch(a, out[-1].split()[-1], re.I) and re.fullmatch(b, t, re.I)
+                       for a, b in COMPOUNDS) and "(" not in out[-1]:
+            out[-1] += " " + t
+        else:
+            out.append(t)
+    if len(out) == 2 and all(w[:1].isupper() for w in out):
+        return out[0], out[1]
+    if len(out) == 2 and any(is_rostov(w) for w in out) and all(re.fullmatch(r"[А-Яа-яЁё-]{4,}", w) for w in out):
+        return out[0], out[1]               # «Ростов лутугино»: второе название с маленькой буквы
+    return None
+
+
 def find_route(lines: list[str]) -> tuple[Optional[str], Optional[str], str]:
     for ln in lines:                    # «из А в Б»
         c = clean_line(ln, strip_preps=False)
-        m = re.match(r"^(?:из|от|с|со)\s+(.+?)\s+(?:в|во|до)\s+(.+)$", c, re.I)
+        m = re.match(r"^(?:из|от|с|со)\s+(.+?)\s+(?:в|во|до|на(?!\s+дон))\s+(.+)$", c, re.I)
         if m:
-            return m.group(1).strip(), m.group(2).strip(), "high"
+            return m.group(1).strip(" ,"), m.group(2).strip(" ,"), "high"
+    for ln in lines:                    # «…отвезти документы из А в Б»: «из» не в начале строки
+        c = clean_line(ln, strip_preps=False)
+        m = re.search(r"(?<!\w)из\s+(.+?)\s+(?:в|во|до|на(?!\s+дон))\s+(.+)$", c, re.I)
+        if m:
+            return m.group(1).strip(" ,"), m.group(2).strip(" ,"), "high"
     cl = [c for c in (clean_line(ln) for ln in lines) if c]
     for i, c in enumerate(cl):
         if "→" in c:
@@ -459,9 +517,9 @@ def find_route(lines: list[str]) -> tuple[Optional[str], Optional[str], str]:
             return strip_prep(parts[0]), strip_prep(parts[1]), "high"
     if len(cl) == 1:                    # «Донецк Ростов», «Донецк-Ростов»: два названия без разделителя
         base = STATION_RE.sub("", cl[0]).strip()
-        words = base.split()
-        if len(words) == 2 and all(w[:1].isupper() for w in words):
-            return words[0], words[1], "low"
+        two = split_two_places(base)
+        if two:
+            return two[0], two[1], "low"
         hy = re.fullmatch(r"([А-ЯЁA-Z][\w]+)-([А-ЯЁA-Z][\w]+)", base)
         if hy and norm_hyphen(base) not in HYPHEN_NAMES:
             return hy.group(1), hy.group(2), "low"
@@ -484,6 +542,22 @@ def find_via(lines: list[str]) -> list[str]:
         if len(segs) >= 3 and all(segs):
             return [parse_place(x)[0] if "," not in x else x.split(",")[-1].strip() for x in segs[1:-1]]
     return []
+
+
+MULTI_LINE_RE = re.compile(r"^\s*\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?\s+\d{1,2}[.:]\d{2}\b")
+
+
+def split_multi(text: str) -> list[str]:
+    """Сообщение со списком заказов (каждый начинается со строки «30.10 22.00 …») -> отдельные тексты."""
+    lines = text.split("\n")
+    starts = [i for i, ln in enumerate(lines) if MULTI_LINE_RE.match(ln)]
+    if len(starts) < 2:
+        return [text]
+    blocks = []
+    for n, i in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        blocks.append("\n".join(lines[i:end]).strip())
+    return blocks
 
 
 NUM_WORDS = {"один": 1, "одна": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5}
@@ -552,6 +626,7 @@ def parse_order(text: str, allow_unrouted: bool = False) -> Optional[Order]:
         for pat in (r"\d+\s*адрес\w*",
                     r"(?:\d+[ \t]*)?(?:детей|дети|ребёнок|ребенок)(?:[ \t]*:[ \t]*\d+)?(?:[ \t]*\(?[ \t]*\d+(?:[ \t]*и[ \t]*\d+)?[ \t]*(?:лет|года|год)[ \t]*\)?)?",
                     r"(?:нужен\s+)?бустер\w*",
+                    r"(?:маленьк\w+\s+)?(?:собак\w*|собачк\w*|кошк\w*)(?:\s+на\s+руках)?",
                     r"\d+\s*дам\w*\s*\+\s*бейб\w*",
                     r"детск\w+\s+кресл\w+(?:\s+обязательн\w+)?"):
             am = re.search(pat, full, re.I)

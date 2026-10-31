@@ -24,6 +24,7 @@ class Settings:
     rates: dict = field(default_factory=lambda: dict(DEFAULT_RATES))
     urgent_pct: int = 20        # надбавка за срочность, %
     muted_chats: list = field(default_factory=list)   # id групп, которые не мониторим
+    dm_only_chats: list = field(default_factory=lambda: ["transferrostobl"])   # группы, где «Я» нельзя: только писать диспетчеру (username без @ или id)
 
 
 def load() -> Settings:
