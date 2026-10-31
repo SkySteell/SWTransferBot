@@ -11,6 +11,8 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Optional
 
+from grammar import nominative
+
 MONTHS = r"(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)"
 
 ARROW_RE = re.compile(
@@ -647,6 +649,9 @@ def parse_order(text: str, allow_unrouted: bool = False) -> Optional[Order]:
                               or re.search(r"\s\d+\s*[а-яё]?$", from_raw.split(",")[0].strip(), re.I)))
     from_city, from_hint = parse_place(from_raw)
     to_city, to_hint = parse_place(to_raw)
+    # в карточке и для расчёта города в именительном падеже: «из Таганрога» -> «Таганрог»
+    from_city, to_city = nominative(from_city), nominative(to_city)
+    from_raw, to_raw = nominative(from_raw), nominative(to_raw)
     return Order(
         from_raw=from_raw, from_city=from_city, from_hint=from_hint,
         to_raw=to_raw, to_city=to_city, to_hint=to_hint,
