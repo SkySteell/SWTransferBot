@@ -31,6 +31,8 @@ FULL_ALIASES = {"ростов на дону": "Ростов-на-Дону", "с�
                 "мин воды": "Минеральные Воды", "минводы": "Минеральные Воды"}
 DISTRICT_WORDS = {"северный", "южный", "западный", "восточный", "центр", "центральный",
                   "сити", "аэропорт", "вокзал", "жд", "ж/д"}
+# Поселения, которые пользователь назвал: без области в заказе ищем их в нужном регионе
+LOCAL_PLACES = {"самбек": "Ростовская область", "куйбышево": "Ростовская область"}
 HINT_MAP = {"лнр": "Луганская область", "днр": "Донецкая область",
             "хнр": "Херсонская область", "знр": "Запорожская область"}
 REGION_WORDS = ("обл", "респ", "край", "район", "р н", "р он", "округ", "лнр", "днр", "хнр", "знр")
@@ -111,6 +113,8 @@ def declension_variants(city: str) -> list[str]:
 def place_queries(city: str, hint: Optional[str]) -> list[str]:
     if norm(city) in FULL_ALIASES:
         return [FULL_ALIASES[norm(city)]]
+    if (not hint or not _is_region_hint(hint)) and norm(city) in LOCAL_PLACES:
+        hint = LOCAL_PLACES[norm(city)]
     words = norm(city).split()
     if words:
         alias = _alias_for(words[0])
@@ -123,6 +127,8 @@ def place_queries(city: str, hint: Optional[str]) -> list[str]:
     qs.append(city)
     qs += declension_variants(city)
     raw = city.split()
+    if len(raw) >= 3 and "-" not in city and _adjectival(raw[0]):
+        qs.append(" ".join(raw[:2]))            # «Белая Калитва Коксовый» -> «Белая Калитва»
     if len(raw) >= 2 and "-" not in city and not _adjectival(raw[0]):
         for n in range(len(raw) - 1, 0, -1):    # «Дебальцево Заводской» -> «Дебальцево»
             qs.append(" ".join(raw[:n]))
@@ -299,6 +305,8 @@ async def calculate(o: Order, rates: dict, urgent_pct: int, geo) -> CalcResult:
             a, b = best_pair(A, B)
             km = await geo.route_km(a, b)
             source = "карта"
+    if km is not None and o.distance_km and abs(km - o.distance_km) / o.distance_km > 0.25:
+        km, source = None, ""                   # карта расходится с км из заказа больше чем на 25%: верим заказу
     if km is None and o.distance_km:
         km, source = float(o.distance_km), "км из заказа"
     if km is None:
