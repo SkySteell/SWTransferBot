@@ -85,6 +85,7 @@ class Seen:
     text: str = ""
     dm_only: bool = False                          # группа из исключений: только писать диспетчеру
     status: Optional[str] = None                   # «Принято: …» после нажатия «Принять»
+    now: Optional[datetime] = None                 # время получения заказа: от него считаются «сегодня/завтра» и «через час»
     res: object = None                             # результат расчёта, пока None карточка показывает «Считаю…»
     calc_error: Optional[str] = None
 
@@ -98,7 +99,8 @@ def find_seen(o: Order) -> Optional[Seen]:
 
 def render_card(e: Seen) -> str:
     text = format_card(e.order, e.dispatcher, e.group, e.res,
-                       extra_groups=max(0, len(e.chats) - 1), calc_error=e.calc_error)
+                       extra_groups=max(0, len(e.chats) - 1), calc_error=e.calc_error,
+                       now=e.now or datetime.now(TZ))
     return text + (f"\n\n✅ {e.status}" if e.status else "")
 
 
@@ -200,14 +202,14 @@ async def process_order(event, cid: int, text: str) -> None:
                 entry.chats[cid] = group
                 await refresh_card(entry)
             return
-        entry = Seen(t=time.time(), order=order, chats={cid: group}, chat_id=cid, msg_id=event.message.id, text=text,
+        entry = Seen(t=time.time(), now=datetime.now(TZ), order=order, chats={cid: group}, chat_id=cid, msg_id=event.message.id, text=text,
                      dm_only=is_dm_only(cid, getattr(chat, "username", None), cfg.dm_only_chats))
         seen[dedupe_key(order)] = entry
 
         sender = await event.get_sender()
-        _, sender_username = who(sender, event.message)
-        # настоящий диспетчер берётся из текста заказа, а не отправитель-бот (решение 30.10)
-        dispatcher = order.dispatcher or "-"
+        sender_name, sender_username = who(sender, event.message)
+        # диспетчер: из текста заказа, иначе тот, кто опубликовал сообщение
+        dispatcher = order.dispatcher or (sender_name if sender_name not in ("", "—") else "-")
         username = order.dispatcher_username or (None if getattr(sender, "bot", False) else sender_username)
         entry.dispatcher, entry.group, entry.username = dispatcher, group, username
 

@@ -136,6 +136,58 @@ def pickup_datetime(o: Order, now: datetime) -> Optional[datetime]:
         return None
 
 
+def order_when(o: Order, now: datetime) -> tuple[Optional[date], Optional[time]]:
+    """Для шапки карточки: дата и время подачи. Время None, если его в заказе нет, дата None, если неизвестна."""
+    t = o.time_text or ""
+    rel = None
+    m = re.search(r"через\s+(\d+(?:[.,]\d+)?)\s*(мин\w*|час\w*|ч(?!\w))", t, re.I)
+    if m:
+        v = float(m.group(1).replace(",", "."))
+        rel = timedelta(minutes=v) if m.group(2).lower().startswith("мин") else timedelta(hours=v)
+    else:
+        m0 = re.search(r"(?:через\s+(пару\s+час\w*|полчаса|час(?!\w))|в\s+(течение\s+часа))", t, re.I)
+        if m0:
+            w = (m0.group(1) or m0.group(2)).lower()
+            rel = timedelta(hours=2 if w.startswith("пару") else 0.5 if w.startswith("полчаса") else 1)
+    if rel is not None:
+        dt = now + rel
+        return dt.date(), dt.time().replace(second=0, microsecond=0)
+    c = re.search(CLOCK, t)
+    day: Optional[date] = None
+    try:
+        d = re.search(DATE_TXT, t, re.I)
+        if d:
+            p = d.group(0).split()
+            day = date(now.year, MONTH_NUM[p[1].lower()], int(p[0]))
+        else:
+            dn = re.search(DATE_NUM, t)
+            if dn:
+                nums = re.findall(r"\d+", dn.group(0))
+                day = date(now.year, int(nums[1]), int(nums[0]))
+    except ValueError:
+        day = None
+    if day is None:
+        w = re.search(r"(сегодня|завтра|послезавтра)", t, re.I)
+        if w:
+            day = now.date() + timedelta(days={"сегодня": 0, "завтра": 1, "послезавтра": 2}[w.group(1).lower()])
+    if c:
+        hh, mm = map(int, c.group(0).split(":"))
+        try:
+            tm = time(hh, mm)
+        except ValueError:
+            return day, None
+        if day is None:
+            day = now.date()
+            if datetime.combine(day, tm, tzinfo=now.tzinfo) < now - timedelta(minutes=30):
+                day += timedelta(days=1)    # время уже прошло: имеется в виду завтра
+        elif "ночью" in t.lower() and hh < 6 and day == now.date() and now.hour >= 12:
+            day += timedelta(days=1)
+        return day, tm
+    if day is None and o.urgent:
+        return now.date(), None
+    return day, None
+
+
 def passes(o: Order, s: Settings, now: datetime) -> tuple[bool, str]:
     if not s.enabled:
         return False, "пауза"

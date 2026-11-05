@@ -1,9 +1,11 @@
 """Оформление карточки заказа для уведомления (макет согласован 28.10)."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from calc import CalcResult
+from filters import order_when
 from order_parser import Order
 
 
@@ -49,18 +51,25 @@ def format_calc(res: Optional[CalcResult], o: Order) -> str:
     return line
 
 
+def head_line(o: Order, now: Optional[datetime] = None) -> str:
+    """Первая строка: сегодня/завтра с датой и временем, дальше только дата и время; срочность в конце."""
+    now = now or datetime.now(timezone(timedelta(hours=3)))
+    d, t = order_when(o, now)
+    if d is None:
+        when = "-"
+    else:
+        days = (d - now.date()).days
+        when = ("сегодня " if days == 0 else "завтра " if days == 1 else "") + d.strftime("%d.%m")
+        if t is not None:
+            when += " " + t.strftime("%H:%M")
+    return f"🆕 ЗАКАЗ · {when}" + (" · ⚡️ СРОЧНО" if o.urgent else "")
+
+
 def format_card(o: Order, dispatcher: str, group: str,
                 calc: Optional[CalcResult] = None, extra_groups: int = 0,
-                calc_error: Optional[str] = None) -> str:
+                calc_error: Optional[str] = None, now: Optional[datetime] = None) -> str:
     """Все строки показываются; если данных нет, ставится «-» (решение 30.10)."""
-    head = "🆕 ЗАКАЗ"
-    if o.urgent:
-        head += " · ⚡️ СРОЧНО"
-    if o.time_text:
-        head += f" · {o.time_text}"
-    elif not o.urgent:
-        head += " · -"
-    lines = [head]
+    lines = [head_line(o, now)]
 
     if o.route_confidence == "none":
         lines.append("📍 -")
