@@ -26,10 +26,12 @@ from telethon.tl.types import Channel, User
 import groups as groups_store
 import settings as settings_store
 from accept import dm_text, dm_url, find_take_button, is_dm_only, wants_dm
+from back import Meta, Rec, min_distance, passes_back, search_back
 from calc import Geo, calculate
 from cards import format_card
 from filters import merge_cities, passes
-from order_parser import Order, parse_order, split_multi
+from grammar import nominative
+from order_parser import ROSTOV, Order, is_rostov, parse_order, split_multi
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("orderbot")
@@ -55,6 +57,12 @@ group_stats: Counter = Counter()  # сколько заказов распозн
 seen: "dict[str, Seen]" = {}   # заказ -> отправленная карточка и группы, где он замечен
 raw_texts: "OrderedDict[int, str]" = OrderedDict()
 cards: "OrderedDict[int, Seen]" = OrderedDict()   # id карточки у бота -> заказ (для кнопки «Принять»)
+recent: "OrderedDict[str, Rec]" = OrderedDict()   # все распознанные заказы за последние сутки (для обратки)
+RECENT_TTL = 30 * 3600
+RECENT_MAX = 5000
+watches: list = []                       # слежение за обраткой: {id, label, coords, radius, hours, expires, sent}
+watch_seq = 0                           # номера слежений для кнопок «Остановить»
+prewarm_tasks: set = set()
 stats: Counter = Counter()
 pending: Optional[str] = None   # какую настройку владелец сейчас вводит
 
@@ -85,6 +93,7 @@ class Seen:
     text: str = ""
     dm_only: bool = False                          # группа из исключений: только писать диспетчеру
     status: Optional[str] = None                   # «Принято: …» после нажатия «Принять»
+    prefix: Optional[str] = None                   # первая строка для карточек обратки
     now: Optional[datetime] = None                 # время получения заказа: от него считаются «сегодня/завтра» и «через час»
     res: object = None                             # результат расчёта, пока None карточка показывает «Считаю…»
     calc_error: Optional[str] = None
@@ -101,7 +110,7 @@ def render_card(e: Seen) -> str:
     text = format_card(e.order, e.dispatcher, e.group, e.res,
                        extra_groups=max(0, len(e.chats) - 1), calc_error=e.calc_error,
                        now=e.now or datetime.now(TZ))
-    return text + (f"\n\n✅ {e.status}" if e.status else "")
+    return (e.prefix + "\n" if e.prefix else "") + text + (f"\n\n✅ {e.status}" if e.status else "")
 
 
 async def refresh_card(e: Seen) -> None:
@@ -175,26 +184,113 @@ async def on_message(event: events.NewMessage.Event) -> None:
             groups_store.save(groups)
         except Exception:
             pass
-    if cid in cfg.muted_chats:
+    if cid in cfg.muted_chats:              # отключённые группы не читаем: ни карточек, ни обратки
         return
     for part in split_multi(event.raw_text):   # в одном сообщении может быть список заказов
         await process_order(event, cid, part)
 
 
+async def build_meta(event, chat, cid: int, text: str, group: str) -> Meta:
+    sender = await event.get_sender()
+    sender_name, sender_username = who(sender, event.message)
+    return Meta(
+        chat_id=cid, msg_id=event.message.id, group=group, dispatcher=sender_name if sender_name not in ("", "—") else "-",
+        username=None if getattr(sender, "bot", False) else sender_username,
+        link=source_link(chat, event.message.id), text=text,
+        dm_only=is_dm_only(cid, getattr(chat, "username", None), cfg.dm_only_chats), now=datetime.now(TZ))
+
+
+def record_recent(order: Order, meta: Meta) -> None:
+    """Запоминаем заказ на сутки: по нему потом ищется обратка. Прогреваем координаты города отправления."""
+    if order.route_confidence == "none" or not order.from_city:
+        return
+    now = datetime.now(TZ)
+    for k in [k for k, r in recent.items() if (now - r.meta.now).total_seconds() > RECENT_TTL]:
+        del recent[k]
+    key = dedupe_key(order)
+    if key not in recent:
+        # диспетчер из текста заказа важнее имени отправителя
+        meta.dispatcher = order.dispatcher or meta.dispatcher
+        meta.username = order.dispatcher_username or meta.username
+        recent[key] = Rec(key, order, meta)
+        while len(recent) > RECENT_MAX:
+            recent.popitem(last=False)
+        if len(prewarm_tasks) < 150:
+            t = asyncio.create_task(coords_of(order))
+            prewarm_tasks.add(t)
+            t.add_done_callback(prewarm_tasks.discard)
+
+
+def live_watches() -> list:
+    """Слежения за обраткой, срок которых не истёк (просроченные удаляются сами)."""
+    now = datetime.now(TZ)
+    watches[:] = [w for w in watches if w["expires"] > now]
+    return watches
+
+
+async def coords_of(o: Order) -> list:
+    try:
+        return await asyncio.wait_for(geo.place_coords(o.from_city, o.from_hint), timeout=25)
+    except Exception:
+        return []
+
+
+async def send_card(order: Order, meta: Meta, prefix: Optional[str] = None, register: bool = True) -> Seen:
+    """Отправляет карточку владельцу и запускает расчёт. register=False: карточка обратки, дубли не ищутся."""
+    entry = Seen(t=time.time(), now=meta.now, order=order, chats={meta.chat_id: meta.group}, chat_id=meta.chat_id,
+                 msg_id=meta.msg_id, text=meta.text, dm_only=meta.dm_only, dispatcher=order.dispatcher or meta.dispatcher,
+                 group=meta.group, username=order.dispatcher_username or meta.username, prefix=prefix)
+    if register:
+        seen[dedupe_key(order)] = entry
+    try:
+        rows = []
+        first = []
+        if meta.link:
+            first.append(Button.url("🔗 Источник", meta.link))
+        if entry.username:
+            first.append(Button.url("💬 Диспетчер", f"https://t.me/{entry.username}"))
+        if first:
+            rows.append(first)
+        rows.append([Button.inline("✅ Принять", b"acc"), Button.inline("🔁 Обратка", b"back")])
+        rows.append([Button.inline("🙈 Скрыть", b"hide"), Button.inline("⚠️ Ошибка", b"bad")])
+        entry.rows = rows
+        sent = await bot.send_message(OWNER_ID, render_card(entry), buttons=rows, link_preview=False)
+    except Exception:
+        if register:
+            seen.pop(dedupe_key(order), None)     # карточка не ушла: не прячем следующий такой же заказ
+        raise
+    entry.sent = sent
+    cards[sent.id] = entry
+    while len(cards) > RAW_KEEP:
+        cards.popitem(last=False)
+    raw_texts[sent.id] = meta.text
+    while len(raw_texts) > RAW_KEEP:
+        raw_texts.popitem(last=False)
+    task = asyncio.create_task(attach_calc(entry))
+    bg_tasks.add(task)
+    task.add_done_callback(bg_tasks.discard)
+    return entry
+
+
 async def process_order(event, cid: int, text: str) -> None:
-    entry = None
     try:
         order = parse_order(text, allow_unrouted=bool(cfg.from_cities or cfg.to_cities))
         if order is None:
             return
+        chat = await event.get_chat()
+        group = getattr(chat, "title", None) or "—"
+        meta = await build_meta(event, chat, cid, text, group)
+        record_recent(order, meta)
         stats["заказов распознано"] += 1
         group_stats[cid] += 1
         ok, reason = passes(order, cfg, datetime.now(TZ))
         if not ok:
             stats[f"отсеяно: {reason}"] += 1
+            if live_watches() and reason != "пауза":
+                task = asyncio.create_task(check_watches(order, meta))
+                bg_tasks.add(task)
+                task.add_done_callback(bg_tasks.discard)
             return
-        chat = await event.get_chat()
-        group = getattr(chat, "title", None) or "—"
         entry = find_seen(order)
         if entry is not None:
             stats["дублей"] += 1
@@ -202,48 +298,82 @@ async def process_order(event, cid: int, text: str) -> None:
                 entry.chats[cid] = group
                 await refresh_card(entry)
             return
-        entry = Seen(t=time.time(), now=datetime.now(TZ), order=order, chats={cid: group}, chat_id=cid, msg_id=event.message.id, text=text,
-                     dm_only=is_dm_only(cid, getattr(chat, "username", None), cfg.dm_only_chats))
-        seen[dedupe_key(order)] = entry
-
-        sender = await event.get_sender()
-        sender_name, sender_username = who(sender, event.message)
-        # диспетчер: из текста заказа, иначе тот, кто опубликовал сообщение
-        dispatcher = order.dispatcher or (sender_name if sender_name not in ("", "—") else "-")
-        username = order.dispatcher_username or (None if getattr(sender, "bot", False) else sender_username)
-        entry.dispatcher, entry.group, entry.username = dispatcher, group, username
-
-        rows = []
-        first = []
-        link = source_link(chat, event.message.id)
-        if link:
-            first.append(Button.url("🔗 Источник", link))
-        if username:
-            first.append(Button.url("💬 Диспетчер", f"https://t.me/{username}"))
-        if first:
-            rows.append(first)
-        rows.append([Button.inline("✅ Принять", b"acc")])
-        rows.append([Button.inline("🙈 Скрыть", b"hide"), Button.inline("⚠️ Ошибка", b"bad")])
-
-        entry.rows = rows
-        sent = await bot.send_message(
-            OWNER_ID, render_card(entry), buttons=rows, link_preview=False,
-        )
-        entry.sent = sent
-        cards[sent.id] = entry
-        while len(cards) > RAW_KEEP:
-            cards.popitem(last=False)
+        await send_card(order, meta)
         stats["отправлено"] += 1
-        raw_texts[sent.id] = text
-        while len(raw_texts) > RAW_KEEP:
-            raw_texts.popitem(last=False)
-        task = asyncio.create_task(attach_calc(entry))
-        bg_tasks.add(task)
-        task.add_done_callback(bg_tasks.discard)
     except Exception:
         log.exception("Ошибка обработки сообщения")
-        if entry is not None and entry.sent is None:
-            seen.pop(dedupe_key(entry.order), None)     # карточка не ушла: не прячем следующий такой же заказ
+
+
+# ---------- обратка ----------
+
+BACK_PROMPT = "В какой город едете? Напишите название, например: Таганрог."
+
+
+def back_label(text: str) -> str:
+    label = nominative(text.strip())
+    return ROSTOV if is_rostov(label) else label
+
+
+async def run_back(label: str, hint: Optional[str] = None) -> None:
+    """Ищет заказы с отправлением рядом с городом label в ближайшие сутки и присылает карточки."""
+    radius, hours = cfg.back_radius_km, cfg.back_hours
+    try:
+        coords = await asyncio.wait_for(geo.place_coords(label, hint), timeout=30)
+    except Exception:
+        coords = []
+    if not coords:
+        await bot.send_message(OWNER_ID, f"Не нашёл «{label}» на карте. Проверьте название и нажмите «🔁 Обратка» ещё раз.")
+        return
+    await bot.send_message(OWNER_ID, f"🔎 Ищу заказы с отправлением в радиусе {radius} км от «{label}», подача в ближайшие {hours} ч…")
+    found, unchecked = await search_back(list(recent.values()), coords, label, radius, cfg, datetime.now(TZ), coords_of, hours)
+    shown = 0
+    for dist, rec in found[:10]:
+        prefix = f"🔁 Обратка к «{label}»: " + ("в самом городе" if dist < 1 else f"{dist:.0f} км от города")
+        try:
+            await send_card(rec.order, rec.meta, prefix=prefix, register=False)
+            shown += 1
+        except Exception:
+            log.exception("Не удалось отправить карточку обратки")
+    note = f"\nГородов ещё не проверено (карта отвечает медленно): {unchecked}. Они появятся, если подойдут, пока идёт слежение." if unchecked else ""
+    found_part = f"✅ Нашёл {len(found)}, показал {shown}." if shown else f"Сейчас ничего не нашёл в радиусе {radius} км."
+    # поиск продолжается hours часов после нажатия, потом сам выключается; можно остановить вручную
+    global watch_seq
+    watches[:] = [w for w in watches if w["label"] != label and w["expires"] > datetime.now(TZ)]
+    watch_seq += 1
+    expires = datetime.now(TZ) + timedelta(hours=hours)
+    watches.append({"id": watch_seq, "label": label, "coords": coords, "radius": radius, "hours": hours,
+                    "expires": expires, "sent": {rec.key for _, rec in found[:shown]}})
+    await bot.send_message(
+        OWNER_ID,
+        f"{found_part}{note}\n🔔 Ищу обратку дальше до {expires.strftime('%d.%m %H:%M')}: новые заказы пришлю сами. Потом поиск выключится.",
+        buttons=[[Button.inline("🛑 Остановить обратку", f"unwatch:{watch_seq}".encode())]])
+
+
+async def check_watches(order: Order, meta: Meta) -> None:
+    """Новый заказ, не прошедший обычные фильтры: подходит ли он под слежение за обраткой."""
+    now = datetime.now(TZ)
+    watches[:] = [w for w in watches if w["expires"] > now]
+    if not watches or order.route_confidence == "none" or not order.from_city:
+        return
+    key = dedupe_key(order)
+    todo = [w for w in watches if key not in w["sent"]]
+    if not todo:
+        return
+    ok, _ = passes_back(order, cfg, now, meta.now, max(w["hours"] for w in todo))
+    if not ok:
+        return
+    coords = await coords_of(order)
+    if not coords:
+        return
+    for w in todo:
+        d = min_distance(coords, w["coords"])
+        if d <= w["radius"]:
+            w["sent"].add(key)
+            prefix = f"🔔 Обратка к «{w['label']}»: " + ("в самом городе" if d < 1 else f"{d:.0f} км от города")
+            try:
+                await send_card(order, meta, prefix=prefix, register=False)
+            except Exception:
+                log.exception("Не удалось отправить карточку слежения")
 
 
 # ---------- меню настроек ----------
@@ -268,6 +398,8 @@ def settings_text() -> str:
         f"📋 Группы: мониторится {groups_store.active_count(groups, cfg.muted_chats)} из {len(groups)}"
         if groups else "📋 Группы: список появится после запуска",
         "🧮 Тарифы ₽/км: " + " / ".join(str(c.rates[t]) for t in TARIFFS) + f" · срочность +{c.urgent_pct}%",
+        f"🔁 Обратка: радиус {c.back_radius_km} км, подача в ближайшие {c.back_hours} ч",
+        *[f"   🔔 ищу обратку к «{w['label']}» до {w['expires'].strftime('%d.%m %H:%M')}" for w in live_watches()],
     ])
 
 
@@ -277,7 +409,9 @@ def settings_buttons():
          Button.inline("🏁 Куда", b"set:to")],
         [Button.inline("⏱ Время", b"set:time"), Button.inline("❓ Неизвестное", b"set:unknown")],
         [Button.inline("📋 Группы", b"set:groups"), Button.inline("🧮 Тарифы", b"set:rates")],
-        [Button.inline("⏸ Пауза" if cfg.enabled else "▶️ Включить", b"set:enabled")],
+        [Button.inline("🔁 Радиус обратки", b"set:back_radius"),
+         Button.inline("⏸ Пауза" if cfg.enabled else "▶️ Включить", b"set:enabled")],
+        *([[Button.inline("🛑 Остановить обратку", b"unwatch_all")]] if live_watches() else []),
     ]
 
 
@@ -380,7 +514,9 @@ def prompt_text(action: str) -> str:
 
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_STATS = "📊 Статистика"
-MAIN_KB = [[Button.text(BTN_SETTINGS, resize=True), Button.text(BTN_STATS, resize=True)]]
+BTN_BACK = "🔁 Обратка"
+MAIN_KB = [[Button.text(BTN_BACK, resize=True)],
+           [Button.text(BTN_SETTINGS, resize=True), Button.text(BTN_STATS, resize=True)]]
 
 
 def stats_text() -> str:
@@ -402,6 +538,7 @@ PROMPTS = {
     "time_hours": "Отправьте число часов (1–72): показывать заказы с подачей в ближайшие N часов.",
     "rate": "Отправьте новую цену за километр (₽), например 28.",
     "urgent": "Отправьте надбавку за срочность в процентах, например 20.",
+    "back_radius": "Отправьте радиус поиска обратки в километрах (10–500), например 100.",
 }
 
 
@@ -421,11 +558,27 @@ async def on_owner_message(event: events.NewMessage.Event) -> None:
     if text == BTN_STATS or text.startswith("/stats"):
         await event.respond(stats_text())
         return
+    if text == BTN_BACK or text.startswith("/back"):
+        pending = "back_city"
+        await event.respond(BACK_PROMPT)
+        return
     if not pending:
         return
     key, pending = pending, None
+    if key == "back_city":
+        label = back_label(text)
+        if not label:
+            pending = key
+            await event.respond(BACK_PROMPT)
+            return
+        task = asyncio.create_task(run_back(label))
+        bg_tasks.add(task)
+        task.add_done_callback(bg_tasks.discard)
+        return
     try:
-        if key == "min_price":
+        if key == "back_radius":
+            cfg.back_radius_km = max(10, min(500, int(text)))
+        elif key == "min_price":
             digits = "".join(ch for ch in text if ch.isdigit())
             cfg.min_price = int(digits) if digits and text != "-" else 0
         elif key == "from":
@@ -512,6 +665,32 @@ async def on_callback(event: events.CallbackQuery.Event) -> None:
     if data == b"acc":
         await accept_order(event)
         return
+    if data == b"back":
+        e = cards.get(event.message_id)
+        if e is None or not e.order.to_city:
+            await event.answer("Город назначения неизвестен, нажмите «🔁 Обратка» внизу и введите город", alert=True)
+            return
+        await event.answer("Ищу обратку…")
+        task = asyncio.create_task(run_back(e.order.to_city, e.order.to_hint))
+        bg_tasks.add(task)
+        task.add_done_callback(bg_tasks.discard)
+        return
+    if data.startswith(b"unwatch:") or data == b"unwatch_all":
+        before = len(watches)
+        if data == b"unwatch_all":
+            watches.clear()
+        else:
+            wid = int(data.split(b":")[1])
+            watches[:] = [w for w in watches if w["id"] != wid]
+        await event.answer("Обратка остановлена" if len(watches) < before else "Уже остановлена")
+        try:
+            if data == b"unwatch_all":
+                await event.edit(settings_text(), buttons=settings_buttons())
+            else:
+                await event.edit("🛑 Поиск обратки остановлен.")
+        except MessageNotModifiedError:
+            pass
+        return
     if data == b"hide":
         await event.delete()
         return
@@ -534,7 +713,7 @@ async def on_callback(event: events.CallbackQuery.Event) -> None:
         return
 
     action = data.decode().split(":", 1)[1]
-    if action in {"min_price", "from", "to"}:
+    if action in {"min_price", "from", "to", "back_radius"}:
         pending = action
         await event.answer()
         await bot.send_message(OWNER_ID, prompt_text(action))
